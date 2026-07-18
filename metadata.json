@@ -1,0 +1,6 @@
+{
+  "name": "OpsFlow",
+  "description": "An intuitive operations hub for project, task, and team management with custom analytics, multilingual views, and an AI assistant.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
