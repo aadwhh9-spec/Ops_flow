@@ -43,8 +43,12 @@ export default function App() {
   const [isSignupMode, setIsSignupMode] = useState(false);
   const [selectedRole, setSelectedRole] = useState<"admin" | "staff">("admin");
   const [loginEmail, setLoginEmail] = useState("ahmed.h@opsflow.io");
+  const [loginPassword, setLoginPassword] = useState("");
   const [signupName, setSignupName] = useState("");
   const [signupEmail, setSignupEmail] = useState("");
+  const [signupPassword, setSignupPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
 
   // Navigation states
   const [adminView, setAdminView] = useState<string>("dash");
@@ -133,36 +137,96 @@ export default function App() {
   }, [chats, chatTarget]);
 
   // Actions
-  const handleLogin = () => {
-    if (selectedRole === "admin") {
+  const handleLogin = async () => {
+    setAuthError("");
+
+    if (!loginEmail || !loginPassword) {
+      setAuthError("Please enter your email and password");
+      return;
+    }
+
+    setAuthLoading(true);
+    try {
+      const res = await fetch("/api/trpc/auth.login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          json: {
+            email: loginEmail,
+            password: loginPassword,
+          },
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error?.json?.message || "Invalid email or password");
+      }
+
+      const role = data?.result?.data?.json?.user?.role;
+      const normalizedRole = String(role || "staff").toLowerCase();
+
+      if (normalizedRole === "admin") {
+        setSelectedRole("admin");
+        setAdminView("dash");
+      } else {
+        setSelectedRole("staff");
+        setStaffView("dash");
+      }
+
       setIsLoggedIn(true);
-      setAdminView("dash");
-    } else {
-      setIsLoggedIn(true);
-      setStaffView("dash");
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : "Login failed");
+    } finally {
+      setAuthLoading(false);
     }
   };
 
   const handleSignup = async () => {
-    if (!signupName || !signupEmail) return;
+    setAuthError("");
+
+    if (!signupName || !signupEmail || !signupPassword) {
+      setAuthError("Please enter your name, email, and password");
+      return;
+    }
+
+    setAuthLoading(true);
     try {
-      // Create team member on backend
-      await fetch("/api/members", {
+      const response = await fetch("/api/trpc/auth.register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({
-          name: signupName,
-          email: signupEmail,
-          role: "Administrator",
-          department: "Management",
+          json: {
+            name: signupName,
+            email: signupEmail,
+            password: signupPassword,
+          },
         }),
       });
-      await fetchWorkspace();
-      setIsLoggedIn(true);
+
+      const text = await response.text();
+      if (!text) {
+        throw new Error("The server returned an empty response");
+      }
+
+      const data = JSON.parse(text);
+      if (!response.ok) {
+        throw new Error(
+          data?.error?.json?.message ||
+          data?.error?.message ||
+          "Registration failed"
+        );
+      }
+
       setSelectedRole("admin");
       setAdminView("dash");
-    } catch (err) {
-      console.error(err);
+      setIsLoggedIn(true);
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : "Registration failed");
+    } finally {
+      setAuthLoading(false);
     }
   };
 
@@ -423,8 +487,9 @@ export default function App() {
                 <label className="block text-xs font-bold text-gray-600 uppercase mb-1 tracking-wider">{t("Password")}</label>
                 <input
                   type="password"
-                  value="••••••••"
-                  readOnly
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  placeholder="Enter password"
                   className="w-full px-4 py-2.5 bg-[#FAFBFD] border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all text-gray-800"
                 />
               </div>
@@ -458,16 +523,21 @@ export default function App() {
                 </button>
               </div>
 
+              {authError && (
+                <p className="text-sm text-red-600 text-center">{authError}</p>
+              )}
+
               <button
                 onClick={handleLogin}
+                disabled={authLoading}
                 className="w-full py-3 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white rounded-xl text-sm font-semibold shadow-md transition-all flex items-center justify-center gap-2"
               >
-                <span>{t("Log In")}</span>
+                <span>{authLoading ? "Logging in..." : t("Log In")}</span>
               </button>
 
               <div className="text-center mt-4">
                 <button
-                  onClick={() => setIsSignupMode(true)}
+                  onClick={() => { setAuthError(""); setIsSignupMode(true); }}
                   className="text-xs text-gray-500 hover:text-gray-900"
                 >
                   Need an Admin account? <span className="font-bold text-blue-600 hover:underline">Register now</span>
@@ -502,21 +572,28 @@ export default function App() {
                 <label className="block text-xs font-bold text-gray-600 uppercase mb-1 tracking-wider">{t("Password")}</label>
                 <input
                   type="password"
-                  placeholder="••••••••"
+                  value={signupPassword}
+                  onChange={(e) => setSignupPassword(e.target.value)}
+                  placeholder="Minimum 8 characters"
                   className="w-full px-4 py-2.5 bg-[#FAFBFD] border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all text-gray-800"
                 />
               </div>
 
+              {authError && (
+                <p className="text-sm text-red-600 text-center">{authError}</p>
+              )}
+
               <button
                 onClick={handleSignup}
+                disabled={authLoading}
                 className="w-full py-3 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white rounded-xl text-sm font-semibold shadow-md transition-all flex items-center justify-center gap-2"
               >
-                <span>{t("Create Account")}</span>
+                <span>{authLoading ? "Creating account..." : t("Create Account")}</span>
               </button>
 
               <div className="text-center mt-4">
                 <button
-                  onClick={() => setIsSignupMode(false)}
+                  onClick={() => { setAuthError(""); setIsSignupMode(false); }}
                   className="text-xs text-gray-500 hover:text-gray-900"
                 >
                   Already have an account? <span className="font-bold text-blue-600 hover:underline">Log In</span>
