@@ -13,6 +13,7 @@ import {
   deleteProject,
   deleteTask,
   getAllProjects,
+  getAllTasks,
   getAllUsers,
   getDashboardStats,
   getDirectRoomsForUser,
@@ -252,6 +253,7 @@ export const appRouter = router({
           await assertProjectAccess(input.projectId, ctx.user.id, ctx.user.role);
           return getTasksForProject(input.projectId, input);
         }
+        if (ctx.user.role === "admin" && !input) return getAllTasks();
         return getAllTasksForUser(ctx.user.id, input);
       }),
     getById: protectedProcedure

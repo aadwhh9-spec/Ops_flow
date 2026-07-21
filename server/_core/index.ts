@@ -8,6 +8,7 @@ import {
   createProject,
   createTask,
   getAllProjects,
+  getAllTasks,
   getAllTasksForUser,
   getAllUsers,
   getProjectsForUser,
@@ -54,7 +55,7 @@ app.get("/api/workspace", async (req, res, next) => {
 
     const [dbProjects, dbTasks, dbUsers] = await Promise.all([
       user.role === "admin" ? getAllProjects() : getProjectsForUser(user.id),
-      getAllTasksForUser(user.id),
+      user.role === "admin" ? getAllTasks() : getAllTasksForUser(user.id),
       getAllUsers(),
     ]);
     const usersById = new Map(dbUsers.map(member => [member.id, member]));

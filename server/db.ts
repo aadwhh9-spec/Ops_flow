@@ -234,6 +234,12 @@ export async function getAllTasksForUser(userId: number, filters?: { status?: st
   return db.select().from(tasks).where(and(...conditions)).orderBy(desc(tasks.createdAt));
 }
 
+export async function getAllTasks() {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(tasks).orderBy(desc(tasks.createdAt));
+}
+
 export async function getTaskById(id: number) {
   const db = await getDb();
   if (!db) return undefined;
