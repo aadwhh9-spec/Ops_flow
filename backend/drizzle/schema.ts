@@ -1,144 +1,183 @@
 import {
   boolean,
-  int,
-  mysqlEnum,
-  mysqlTable,
+  integer,
+  pgEnum,
+  pgTable,
+  serial,
   text,
   timestamp,
+  uniqueIndex,
   varchar,
-} from "drizzle-orm/mysql-core";
+} from "drizzle-orm/pg-core";
 
-// ─── Users ────────────────────────────────────────────────────────────────────
-export const users = mysqlTable("users", {
-  id: int("id").autoincrement().primaryKey(),
+export const userRoleEnum = pgEnum("user_role", ["user", "admin"]);
+export const projectMemberRoleEnum = pgEnum("project_member_role", [
+  "viewer",
+  "member",
+  "manager",
+]);
+export const taskStatusEnum = pgEnum("task_status", [
+  "pending",
+  "approval",
+  "processing",
+  "done",
+]);
+export const taskPriorityEnum = pgEnum("task_priority", [
+  "low",
+  "medium",
+  "high",
+  "urgent",
+]);
+export const chatRoomTypeEnum = pgEnum("chat_room_type", ["global", "direct"]);
+export const notificationTypeEnum = pgEnum("notification_type", [
+  "task_assigned",
+  "task_status_changed",
+  "task_mentioned",
+  "project_added",
+  "message_received",
+]);
+
+const createdAt = () =>
+  timestamp("createdAt", { withTimezone: true }).defaultNow().notNull();
+
+const updatedAt = () =>
+  timestamp("updatedAt", { withTimezone: true }).defaultNow().notNull();
+
+// Users
+export const users = pgTable("users", {
+  id: serial("id").primaryKey(),
   openId: varchar("openId", { length: 64 }).notNull().unique(),
   name: text("name"),
   email: varchar("email", { length: 320 }),
   avatarUrl: text("avatarUrl"),
   loginMethod: varchar("loginMethod", { length: 64 }),
-  role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
-  lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
+  passwordHash: varchar("passwordHash", { length: 255 }),
+  role: userRoleEnum("role").default("user").notNull(),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+  lastSignedIn: timestamp("lastSignedIn", { withTimezone: true }).defaultNow().notNull(),
 });
 
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
 
-// ─── Projects ─────────────────────────────────────────────────────────────────
-export const projects = mysqlTable("projects", {
-  id: int("id").autoincrement().primaryKey(),
+// Projects
+export const projects = pgTable("projects", {
+  id: serial("id").primaryKey(),
   name: varchar("name", { length: 255 }).notNull(),
   description: text("description"),
   color: varchar("color", { length: 32 }).notNull().default("#6366f1"),
-  ownerId: int("ownerId").notNull(),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  ownerId: integer("ownerId").notNull(),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
 });
 
 export type Project = typeof projects.$inferSelect;
 export type InsertProject = typeof projects.$inferInsert;
 
-// ─── Project Members ──────────────────────────────────────────────────────────
-export const projectMembers = mysqlTable("project_members", {
-  id: int("id").autoincrement().primaryKey(),
-  projectId: int("projectId").notNull(),
-  userId: int("userId").notNull(),
-  role: mysqlEnum("role", ["viewer", "member", "manager"]).notNull().default("member"),
-  joinedAt: timestamp("joinedAt").defaultNow().notNull(),
-});
+// Project Members
+export const projectMembers = pgTable(
+  "project_members",
+  {
+    id: serial("id").primaryKey(),
+    projectId: integer("projectId").notNull(),
+    userId: integer("userId").notNull(),
+    role: projectMemberRoleEnum("role").notNull().default("member"),
+    joinedAt: timestamp("joinedAt", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("project_members_project_user_unique").on(
+      table.projectId,
+      table.userId,
+    ),
+  ],
+);
 
 export type ProjectMember = typeof projectMembers.$inferSelect;
 export type InsertProjectMember = typeof projectMembers.$inferInsert;
 
-// ─── Tasks ────────────────────────────────────────────────────────────────────
-export const tasks = mysqlTable("tasks", {
-  id: int("id").autoincrement().primaryKey(),
+// Tasks
+export const tasks = pgTable("tasks", {
+  id: serial("id").primaryKey(),
   title: varchar("title", { length: 512 }).notNull(),
   description: text("description"),
-  status: mysqlEnum("status", ["pending", "approval", "processing", "done"]).notNull().default("pending"),
-  priority: mysqlEnum("priority", ["low", "medium", "high", "urgent"]).notNull().default("medium"),
-  projectId: int("projectId").notNull(),
-  assigneeId: int("assigneeId"),
-  creatorId: int("creatorId").notNull(),
-  startDate: timestamp("startDate"),
-  dueDate: timestamp("dueDate"),
-  completedAt: timestamp("completedAt"),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  status: taskStatusEnum("status").notNull().default("pending"),
+  priority: taskPriorityEnum("priority").notNull().default("medium"),
+  projectId: integer("projectId").notNull(),
+  assigneeId: integer("assigneeId"),
+  creatorId: integer("creatorId").notNull(),
+  startDate: timestamp("startDate", { withTimezone: true }),
+  dueDate: timestamp("dueDate", { withTimezone: true }),
+  completedAt: timestamp("completedAt", { withTimezone: true }),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
 });
 
 export type Task = typeof tasks.$inferSelect;
 export type InsertTask = typeof tasks.$inferInsert;
 
-// ─── Chat Rooms ───────────────────────────────────────────────────────────────
-export const chatRooms = mysqlTable("chat_rooms", {
-  id: int("id").autoincrement().primaryKey(),
-  type: mysqlEnum("type", ["global", "direct"]).notNull(),
+// Chat Rooms
+export const chatRooms = pgTable("chat_rooms", {
+  id: serial("id").primaryKey(),
+  type: chatRoomTypeEnum("type").notNull(),
   name: varchar("name", { length: 255 }),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  createdAt: createdAt(),
 });
 
 export type ChatRoom = typeof chatRooms.$inferSelect;
 export type InsertChatRoom = typeof chatRooms.$inferInsert;
 
-// ─── Chat Room Members ────────────────────────────────────────────────────────
-export const chatRoomMembers = mysqlTable("chat_room_members", {
-  id: int("id").autoincrement().primaryKey(),
-  roomId: int("roomId").notNull(),
-  userId: int("userId").notNull(),
-  joinedAt: timestamp("joinedAt").defaultNow().notNull(),
+// Chat Room Members
+export const chatRoomMembers = pgTable("chat_room_members", {
+  id: serial("id").primaryKey(),
+  roomId: integer("roomId").notNull(),
+  userId: integer("userId").notNull(),
+  joinedAt: timestamp("joinedAt", { withTimezone: true }).defaultNow().notNull(),
 });
 
 export type ChatRoomMember = typeof chatRoomMembers.$inferSelect;
 export type InsertChatRoomMember = typeof chatRoomMembers.$inferInsert;
 
-// ─── Messages ─────────────────────────────────────────────────────────────────
-export const messages = mysqlTable("messages", {
-  id: int("id").autoincrement().primaryKey(),
-  roomId: int("roomId").notNull(),
-  senderId: int("senderId").notNull(),
+// Messages
+export const messages = pgTable("messages", {
+  id: serial("id").primaryKey(),
+  roomId: integer("roomId").notNull(),
+  senderId: integer("senderId").notNull(),
   content: text("content").notNull(),
   isEdited: boolean("isEdited").notNull().default(false),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
 });
 
 export type Message = typeof messages.$inferSelect;
 export type InsertMessage = typeof messages.$inferInsert;
 
-// ─── Notifications ────────────────────────────────────────────────────────────
-export const notifications = mysqlTable("notifications", {
-  id: int("id").autoincrement().primaryKey(),
-  userId: int("userId").notNull(),
-  type: mysqlEnum("type", [
-    "task_assigned",
-    "task_status_changed",
-    "task_mentioned",
-    "project_added",
-    "message_received",
-  ]).notNull(),
+// Notifications
+export const notifications = pgTable("notifications", {
+  id: serial("id").primaryKey(),
+  userId: integer("userId").notNull(),
+  type: notificationTypeEnum("type").notNull(),
   title: varchar("title", { length: 512 }).notNull(),
   body: text("body"),
   isRead: boolean("isRead").notNull().default(false),
-  relatedTaskId: int("relatedTaskId"),
-  relatedProjectId: int("relatedProjectId"),
-  actorId: int("actorId"),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  relatedTaskId: integer("relatedTaskId"),
+  relatedProjectId: integer("relatedProjectId"),
+  actorId: integer("actorId"),
+  createdAt: createdAt(),
 });
 
 export type Notification = typeof notifications.$inferSelect;
 export type InsertNotification = typeof notifications.$inferInsert;
 
-// ─── Activities ───────────────────────────────────────────────────────────────
-export const activities = mysqlTable("activities", {
-  id: int("id").autoincrement().primaryKey(),
-  userId: int("userId").notNull(),
+// Activities
+export const activities = pgTable("activities", {
+  id: serial("id").primaryKey(),
+  userId: integer("userId").notNull(),
   type: varchar("type", { length: 64 }).notNull(),
   description: text("description").notNull(),
-  relatedTaskId: int("relatedTaskId"),
-  relatedProjectId: int("relatedProjectId"),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  relatedTaskId: integer("relatedTaskId"),
+  relatedProjectId: integer("relatedProjectId"),
+  createdAt: createdAt(),
 });
 
 export type Activity = typeof activities.$inferSelect;

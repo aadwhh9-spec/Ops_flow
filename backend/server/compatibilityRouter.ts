@@ -1,56 +1,51 @@
-import "dotenv/config";
-import express from "express";
-import * as trpcExpress from "@trpc/server/adapters/express";
-import { ENV } from "./env";
-import { createContext } from "./trpc";
-import { appRouter } from "../routers";
+﻿import { Router, type Request, type Response } from "express";
+import { createContext } from "./_core/trpc";
 import {
+  addProjectMember,
   createProject,
   createTask,
   getAllProjects,
   getAllTasks,
   getAllTasksForUser,
   getAllUsers,
+  getProjectMembers,
   getProjectsForUser,
   getTaskById,
+  getUserByEmail,
   isProjectMember,
   updateTask,
   upsertUser,
-} from "../db";
+} from "./db";
 
-const app = express();
+export const compatibilityRouter = Router();
 
-app.use(express.json());
+async function authenticatedUser(req: Request, res: Response) {
+  const { user } = await createContext({ req, res } as any);
+  return user;
+}
 
-const projectStatus = (tasks: any[]) => {
+function projectStatus(tasks: Array<{ status: string }>) {
   if (tasks.length === 0) return "Planning" as const;
   if (tasks.every(task => task.status === "done")) return "Completed" as const;
   if (tasks.some(task => task.status === "approval")) return "Review" as const;
   return "In Progress" as const;
-};
+}
 
-const uiTaskStatus = (status: string) => {
+function uiTaskStatus(status: string) {
   if (status === "done") return "Completed" as const;
   if (status === "processing" || status === "approval") return "In Progress" as const;
   return "Not Started" as const;
-};
+}
 
-const dbTaskStatus = (status: string) => {
+function dbTaskStatus(status: string) {
   if (status === "Completed") return "done" as const;
   if (status === "In Progress") return "processing" as const;
   return "pending" as const;
-};
-
-async function getAuthenticatedUser(req: express.Request, res: express.Response) {
-  const context = await createContext({ req, res } as any);
-  return context.user;
 }
 
-// Compatibility API for the current React UI. The database and authentication
-// remain owned by the newer tRPC backend.
-app.get("/api/workspace", async (req, res, next) => {
+compatibilityRouter.get("/workspace", async (req, res, next) => {
   try {
-    const user = await getAuthenticatedUser(req, res);
+    const user = await authenticatedUser(req, res);
     if (!user) return res.status(401).json({ error: "You must be logged in" });
 
     const [dbProjects, dbTasks, dbUsers] = await Promise.all([
@@ -59,20 +54,25 @@ app.get("/api/workspace", async (req, res, next) => {
       getAllUsers(),
     ]);
     const usersById = new Map(dbUsers.map(member => [member.id, member]));
+    const projectTeams = new Map<number, string[]>();
+    await Promise.all(dbProjects.map(async project => {
+      const rows = await getProjectMembers(project.id);
+      projectTeams.set(project.id, rows.map(row => row.user.name ?? row.user.email ?? "Member"));
+    }));
 
     const projects = dbProjects.map(project => {
-      const tasks = dbTasks.filter(task => task.projectId === project.id);
-      const completed = tasks.filter(task => task.status === "done").length;
+      const projectTasks = dbTasks.filter(task => task.projectId === project.id);
+      const completed = projectTasks.filter(task => task.status === "done").length;
       return {
         id: String(project.id),
         name: project.name,
         description: project.description ?? "",
-        status: projectStatus(tasks),
+        status: projectStatus(projectTasks),
         startDate: project.createdAt.toISOString().slice(0, 10),
         endDate: "TBD",
-        progress: tasks.length ? Math.round((completed / tasks.length) * 100) : 0,
+        progress: projectTasks.length ? Math.round((completed / projectTasks.length) * 100) : 0,
         color: project.color,
-        team: dbUsers.filter(member => tasks.some(task => task.assigneeId === member.id)).map(member => member.name ?? member.email ?? "Member"),
+        team: projectTeams.get(project.id) ?? [],
       };
     });
 
@@ -96,15 +96,15 @@ app.get("/api/workspace", async (req, res, next) => {
       since: member.createdAt.toLocaleString("en-US", { month: "short", year: "numeric" }),
     }));
 
-    res.json({ projects, tasks, members, chats: [] });
+    return res.json({ projects, tasks, members, chats: [] });
   } catch (error) {
     next(error);
   }
 });
 
-app.post("/api/projects", async (req, res, next) => {
+compatibilityRouter.post("/projects", async (req, res, next) => {
   try {
-    const user = await getAuthenticatedUser(req, res);
+    const user = await authenticatedUser(req, res);
     if (!user) return res.status(401).json({ error: "You must be logged in" });
     if (!req.body.name) return res.status(400).json({ error: "Project name is required" });
     const project = await createProject({
@@ -113,15 +113,15 @@ app.post("/api/projects", async (req, res, next) => {
       color: req.body.color,
       ownerId: user.id,
     });
-    res.status(201).json({ success: true, project });
+    return res.status(201).json({ success: true, project });
   } catch (error) {
     next(error);
   }
 });
 
-app.post("/api/tasks", async (req, res, next) => {
+compatibilityRouter.post("/tasks", async (req, res, next) => {
   try {
-    const user = await getAuthenticatedUser(req, res);
+    const user = await authenticatedUser(req, res);
     if (!user) return res.status(401).json({ error: "You must be logged in" });
     const projectId = Number(req.body.projectId);
     if (!projectId || !req.body.name) return res.status(400).json({ error: "Project and task name are required" });
@@ -129,63 +129,51 @@ app.post("/api/tasks", async (req, res, next) => {
       return res.status(403).json({ error: "Not a project member" });
     }
     const users = await getAllUsers();
-    const assignee = users.find(member => member.name === req.body.assignedTo);
+    const assignee = users.find(candidate => candidate.name === req.body.assignedTo);
     const task = await createTask({
       projectId,
       title: req.body.name,
       creatorId: user.id,
       assigneeId: assignee?.id,
-      priority: String(req.body.priority ?? "medium").toLowerCase() as "low" | "medium" | "high",
+      priority: String(req.body.priority).toLowerCase() === "high" ? "high" : String(req.body.priority).toLowerCase() === "low" ? "low" : "medium",
     });
-    res.status(201).json({ success: true, task });
+    return res.status(201).json({ success: true, task });
   } catch (error) {
     next(error);
   }
 });
 
-app.patch("/api/tasks/:id", async (req, res, next) => {
+compatibilityRouter.patch("/tasks/:id", async (req, res, next) => {
   try {
-    const user = await getAuthenticatedUser(req, res);
+    const user = await authenticatedUser(req, res);
     if (!user) return res.status(401).json({ error: "You must be logged in" });
-    const id = Number(req.params.id);
-    if (!id) return res.status(400).json({ error: "Invalid task id" });
-    const task = await getTaskById(id);
+    const task = await getTaskById(Number(req.params.id));
     if (!task) return res.status(404).json({ error: "Task not found" });
     if (user.role !== "admin" && !(await isProjectMember(task.projectId, user.id))) {
       return res.status(403).json({ error: "Not a project member" });
     }
-    await updateTask(id, { status: dbTaskStatus(req.body.status) });
-    res.json({ success: true });
+    await updateTask(task.id, { status: dbTaskStatus(req.body.status) });
+    return res.json({ success: true });
   } catch (error) {
     next(error);
   }
 });
 
-app.post("/api/members", async (req, res, next) => {
+compatibilityRouter.post("/members", async (req, res, next) => {
   try {
-    const user = await getAuthenticatedUser(req, res);
+    const user = await authenticatedUser(req, res);
     if (!user) return res.status(401).json({ error: "You must be logged in" });
-    if (user.role !== "admin") return res.status(403).json({ error: "Admin only" });
-    if (!req.body.name || !req.body.email) return res.status(400).json({ error: "Name and email are required" });
-    await upsertUser({ openId: req.body.email, name: req.body.name, email: req.body.email, loginMethod: "invite" });
-    res.status(201).json({ success: true });
+    if (!req.body.email) return res.status(400).json({ error: "Email is required" });
+    const email = String(req.body.email).trim().toLowerCase();
+    let member = await getUserByEmail(email);
+    if (!member) {
+      await upsertUser({ openId: email, email, name: req.body.name, loginMethod: "invited" });
+      member = await getUserByEmail(email);
+    }
+    if (!member) throw new Error("Failed to create member");
+    if (req.body.projectId) await addProjectMember(Number(req.body.projectId), member.id);
+    return res.status(201).json({ success: true, member });
   } catch (error) {
     next(error);
   }
-});
-
-app.use(
-  "/api/trpc",
-  trpcExpress.createExpressMiddleware({
-    router: appRouter,
-    createContext,
-  }),
-);
-
-app.get("/health", (_req, res) => {
-  res.json({ status: "ok" });
-});
-
-app.listen(ENV.port, () => {
-  console.log(`OpsFlow backend listening on port ${ENV.port}`);
 });

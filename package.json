@@ -1,19 +1,15 @@
 {
-  "name": "opsflow-backend",
+  "name": "opsflow-frontend",
   "version": "1.0.0",
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "dev": "cross-env NODE_ENV=development tsx watch server/_core/index.ts",
-    "build": "esbuild server/_core/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
-    "start": "NODE_ENV=production node dist/index.js",
+    "dev": "vite",
+    "build": "vite build",
+    "start": "vite preview",
     "check": "tsc --noEmit",
     "format": "prettier --write .",
-    "test": "vitest run",
-    "db:generate": "drizzle-kit generate",
-    "db:check": "drizzle-kit check",
-    "db:migrate": "drizzle-kit migrate",
-    "db:push": "npm run db:generate && npm run db:migrate"
+    "test": "vitest run"
   },
   "dependencies": {
     "@trpc/server": "^11.6.0",
@@ -34,6 +30,8 @@
     "@tailwindcss/vite": "^4.3.3",
     "@types/express": "4.17.21",
     "@types/node": "^24.7.0",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react": "^4.3.4",
     "cross-env": "^10.1.0",
     "drizzle-kit": "^0.31.4",
@@ -41,6 +39,7 @@
     "prettier": "^3.6.2",
     "tsx": "^4.19.1",
     "typescript": "5.9.3",
+    "vite": "^5.4.21",
     "vitest": "^2.1.4"
   }
 }

@@ -1,5 +1,6 @@
-import { and, desc, eq, inArray, like, or, sql } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/mysql2";
+﻿import { and, desc, eq, inArray, like, or, sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
 import {
   activities,
   chatRoomMembers,
@@ -20,20 +21,22 @@ import {
 import { ENV } from "./_core/env";
 
 let _db: ReturnType<typeof drizzle> | null = null;
+let _client: postgres.Sql | null = null;
 
 export async function getDb() {
-  if (!_db && process.env.DATABASE_URL) {
-    try {
-      _db = drizzle(process.env.DATABASE_URL);
-    } catch (error) {
-      console.warn("[Database] Failed to connect:", error);
-      _db = null;
-    }
+  if (!process.env.DATABASE_URL) {
+    throw new Error("DATABASE_URL is missing. Add it to backend/.env");
   }
+
+  if (!_db) {
+    _client = postgres(process.env.DATABASE_URL, { prepare: false });
+    _db = drizzle({ client: _client });
+  }
+
   return _db;
 }
 
-// ─── Users ────────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Users â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export async function upsertUser(user: InsertUser): Promise<void> {
   if (!user.openId) throw new Error("User openId is required for upsert");
   const db = await getDb();
@@ -42,7 +45,7 @@ export async function upsertUser(user: InsertUser): Promise<void> {
   const values: InsertUser = { openId: user.openId };
   const updateSet: Record<string, unknown> = {};
 
-  const fields = ["name", "email", "loginMethod", "avatarUrl"] as const;
+  const fields = ["name", "email", "loginMethod", "avatarUrl", "passwordHash"] as const;
   for (const field of fields) {
     const val = user[field];
     if (val !== undefined) {
@@ -66,13 +69,25 @@ export async function upsertUser(user: InsertUser): Promise<void> {
   if (!values.lastSignedIn) values.lastSignedIn = new Date();
   if (Object.keys(updateSet).length === 0) updateSet.lastSignedIn = new Date();
 
-  await db.insert(users).values(values).onDuplicateKeyUpdate({ set: updateSet });
+  await db
+    .insert(users)
+    .values(values)
+    .onConflictDoUpdate({
+      target: users.openId,
+      set: updateSet,
+    });
 }
 
 export async function getUserByOpenId(openId: string) {
   const db = await getDb();
   if (!db) return undefined;
   const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
+  return result[0];
+}
+
+export async function getUserByEmail(email: string) {
+  const db = await getDb();
+  const result = await db.select().from(users).where(eq(users.email, email)).limit(1);
   return result[0];
 }
 
@@ -88,15 +103,23 @@ export async function updateUserRole(userId: number, role: "user" | "admin") {
   await db.update(users).set({ role }).where(eq(users.id, userId));
 }
 
-// ─── Projects ─────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Projects â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export async function createProject(data: InsertProject) {
   const db = await getDb();
   if (!db) throw new Error("DB not available");
-  const [result] = await db.insert(projects).values(data).$returningId();
-  const proj = await db.select().from(projects).where(eq(projects.id, result.id)).limit(1);
+  const [project] = await db.insert(projects).values(data).returning();
+  if (!project) throw new Error("Failed to create project");
+
   // Auto-add owner as manager
-  await db.insert(projectMembers).values({ projectId: result.id, userId: data.ownerId, role: "manager" });
-  return proj[0];
+  await db
+    .insert(projectMembers)
+    .values({ projectId: project.id, userId: data.ownerId, role: "manager" })
+    .onConflictDoUpdate({
+      target: [projectMembers.projectId, projectMembers.userId],
+      set: { role: "manager" },
+    });
+
+  return project;
 }
 
 export async function getProjectsForUser(userId: number) {
@@ -151,8 +174,13 @@ export async function getProjectMembers(projectId: number) {
 export async function addProjectMember(projectId: number, userId: number, role: "viewer" | "member" | "manager" = "member") {
   const db = await getDb();
   if (!db) return;
-  await db.insert(projectMembers).values({ projectId, userId, role })
-    .onDuplicateKeyUpdate({ set: { role } });
+  await db
+    .insert(projectMembers)
+    .values({ projectId, userId, role })
+    .onConflictDoUpdate({
+      target: [projectMembers.projectId, projectMembers.userId],
+      set: { role },
+    });
 }
 
 export async function removeProjectMember(projectId: number, userId: number) {
@@ -170,13 +198,18 @@ export async function isProjectMember(projectId: number, userId: number): Promis
   return result.length > 0;
 }
 
-// ─── Tasks ────────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Tasks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export async function createTask(data: InsertTask) {
   const db = await getDb();
   if (!db) throw new Error("DB not available");
-  const [result] = await db.insert(tasks).values(data).$returningId();
-  const task = await db.select().from(tasks).where(eq(tasks.id, result.id)).limit(1);
-  return task[0];
+  const [task] = await db.insert(tasks).values(data).returning();
+  if (!task) throw new Error("Failed to create task");
+
+  if (data.assigneeId) {
+    await addProjectMember(data.projectId, data.assigneeId, "member");
+  }
+
+  return task;
 }
 
 export async function getTasksForProject(projectId: number, filters?: { status?: string; priority?: string; assigneeId?: number; search?: string }) {
@@ -216,6 +249,23 @@ export async function getAllTasksForUser(userId: number, filters?: { status?: st
   return db.select().from(tasks).where(and(...conditions)).orderBy(desc(tasks.createdAt));
 }
 
+export async function getAllTasks(filters?: { status?: string; priority?: string; search?: string; projectId?: number; assigneeId?: number }) {
+  const db = await getDb();
+  if (!db) return [];
+
+  const conditions = [];
+  if (filters?.status) conditions.push(eq(tasks.status, filters.status as any));
+  if (filters?.priority) conditions.push(eq(tasks.priority, filters.priority as any));
+  if (filters?.search) conditions.push(like(tasks.title, `%${filters.search}%`));
+  if (filters?.projectId) conditions.push(eq(tasks.projectId, filters.projectId));
+  if (filters?.assigneeId) conditions.push(eq(tasks.assigneeId, filters.assigneeId));
+
+  const query = db.select().from(tasks);
+  return conditions.length > 0
+    ? query.where(and(...conditions)).orderBy(desc(tasks.createdAt))
+    : query.orderBy(desc(tasks.createdAt));
+}
+
 export async function getTaskById(id: number) {
   const db = await getDb();
   if (!db) return undefined;
@@ -230,6 +280,13 @@ export async function updateTask(id: number, data: Partial<InsertTask>) {
   if (data.status === "done" && !data.completedAt) updateData.completedAt = new Date();
   if (data.status && data.status !== "done") updateData.completedAt = null;
   await db.update(tasks).set(updateData).where(eq(tasks.id, id));
+
+  if (data.assigneeId) {
+    const updatedTask = await getTaskById(id);
+    if (updatedTask) {
+      await addProjectMember(updatedTask.projectId, data.assigneeId, "member");
+    }
+  }
 }
 
 export async function deleteTask(id: number) {
@@ -238,7 +295,7 @@ export async function deleteTask(id: number) {
   await db.delete(tasks).where(eq(tasks.id, id));
 }
 
-// ─── Chat ─────────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Chat â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export async function getGlobalRoom() {
   const db = await getDb();
   if (!db) return undefined;
@@ -265,13 +322,15 @@ export async function getOrCreateDirectRoom(userId1: number, userId2: number) {
     }
   }
   // Create new DM room
-  const [result] = await db.insert(chatRooms).values({ type: "direct" }).$returningId();
+  const [room] = await db.insert(chatRooms).values({ type: "direct" }).returning();
+  if (!room) throw new Error("Failed to create direct chat room");
+
   await db.insert(chatRoomMembers).values([
-    { roomId: result.id, userId: userId1 },
-    { roomId: result.id, userId: userId2 },
+    { roomId: room.id, userId: userId1 },
+    { roomId: room.id, userId: userId2 },
   ]);
-  const room = await db.select().from(chatRooms).where(eq(chatRooms.id, result.id)).limit(1);
-  return room[0];
+
+  return room;
 }
 
 export async function isRoomMember(roomId: number, userId: number): Promise<boolean> {
@@ -298,12 +357,15 @@ export async function getMessages(roomId: number, limit = 50) {
 export async function sendMessage(data: InsertMessage) {
   const db = await getDb();
   if (!db) throw new Error("DB not available");
-  const [result] = await db.insert(messages).values(data).$returningId();
+  const [inserted] = await db.insert(messages).values(data).returning({ id: messages.id });
+  if (!inserted) throw new Error("Failed to send message");
+
   const rows = await db
     .select({ message: messages, sender: users })
     .from(messages)
     .innerJoin(users, eq(messages.senderId, users.id))
-    .where(eq(messages.id, result.id)).limit(1);
+    .where(eq(messages.id, inserted.id))
+    .limit(1);
   return rows[0];
 }
 
@@ -329,7 +391,7 @@ export async function getDirectRoomsForUser(userId: number) {
   return result;
 }
 
-// ─── Notifications ────────────────────────────────────────────────────────────
+// â”€â”€â”€ Notifications â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export async function createNotification(data: InsertNotification) {
   const db = await getDb();
   if (!db) return;
@@ -367,7 +429,7 @@ export async function getUnreadNotificationCount(userId: number) {
   return Number(result[0]?.count ?? 0);
 }
 
-// ─── Activities ───────────────────────────────────────────────────────────────
+// â”€â”€â”€ Activities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export async function createActivity(data: InsertActivity) {
   const db = await getDb();
   if (!db) return;
@@ -394,7 +456,7 @@ export async function getRecentActivities(userId: number, limit = 20) {
   return rows;
 }
 
-// ─── Dashboard Stats ──────────────────────────────────────────────────────────
+// â”€â”€â”€ Dashboard Stats â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export async function getDashboardStats(userId: number) {
   const db = await getDb();
   if (!db) return { activeTasks: 0, completedTasks: 0, projectCount: 0, pendingApproval: 0 };
