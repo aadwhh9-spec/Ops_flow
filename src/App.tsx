@@ -477,7 +477,10 @@ export default function App() {
     (m) => ((m as any).email || "").toLowerCase() === loginEmail.toLowerCase()
   );
   const effectiveUserName = currentMember?.name || currentUserName;
-const staffTasksList = tasks.filter((t) => t.assignedTo === effectiveUserName);
+  const staffProjectsList = projects.filter((p) =>
+    Array.isArray(p.team) && p.team.includes(effectiveUserName)
+  );
+  const staffTasksList = tasks.filter((t) => t.assignedTo === effectiveUserName);
   const staffCompletedTasksCount = staffTasksList.filter((t) => t.status === "Completed").length;
   const staffTasksProgressPercent = staffTasksList.length > 0 ? Math.round((staffCompletedTasksCount / staffTasksList.length) * 100) : 0;
 
@@ -949,6 +952,30 @@ const staffTasksList = tasks.filter((t) => t.assignedTo === effectiveUserName);
             >
               <LayoutDashboard className="w-4.5 h-4.5" />
               <span>{t("Dashboard")}</span>
+            </button>
+
+            <button
+              onClick={() => setStaffView("projects")}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-bold tracking-wide transition-all ${
+                staffView === "projects" || staffView === "projectdetail"
+                  ? "bg-[#1A2338] text-white"
+                  : "text-gray-400 hover:text-white hover:bg-gray-800/35"
+              }`}
+            >
+              <Folder className="w-4.5 h-4.5" />
+              <span>My Projects</span>
+            </button>
+
+            <button
+              onClick={() => setStaffView("tasks")}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-bold tracking-wide transition-all ${
+                staffView === "tasks"
+                  ? "bg-[#1A2338] text-white"
+                  : "text-gray-400 hover:text-white hover:bg-gray-800/35"
+              }`}
+            >
+              <CheckSquare className="w-4.5 h-4.5" />
+              <span>My Tasks</span>
             </button>
 
             <div>
@@ -1448,7 +1475,7 @@ const staffTasksList = tasks.filter((t) => t.assignedTo === effectiveUserName);
                             className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm hover:shadow-md transition-all flex flex-col h-full"
                           >
                             <div className="flex justify-between items-start mb-3">
-                              <span className="w-4.5 h-4.5 rounded-lg flex items-center justify-center font-bold text-xs" style={{ backgroundColor: `${proj.color}20`, color: proj.color }}>ðŸ“</span>
+                              <span className="w-4.5 h-4.5 rounded-lg flex items-center justify-center font-bold text-xs" style={{ backgroundColor: `${proj.color}20`, color: proj.color }}>P</span>
                               <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider ${
                                 proj.status === "In Progress" ? "bg-blue-50 text-blue-600" : "bg-purple-50 text-purple-600"
                               }`}>
@@ -1469,7 +1496,7 @@ const staffTasksList = tasks.filter((t) => t.assignedTo === effectiveUserName);
                               </div>
 
                               <div className="flex items-center justify-between pt-2 border-t border-gray-50 text-xs">
-                                <span className="text-gray-400 font-semibold">{proj.startDate} â€“ {proj.endDate}</span>
+                                <span className="text-gray-400 font-semibold">{proj.startDate} - {proj.endDate}</span>
                                 <button
                                   onClick={() => {
                                     setActiveProjectKey(proj.id);
@@ -1477,7 +1504,7 @@ const staffTasksList = tasks.filter((t) => t.assignedTo === effectiveUserName);
                                   }}
                                   className="text-blue-600 hover:underline font-bold"
                                 >
-                                  Inspect Details â€º
+                                  Inspect Details
                                 </button>
                               </div>
                             </div>
@@ -2208,9 +2235,7 @@ const staffTasksList = tasks.filter((t) => t.assignedTo === effectiveUserName);
                       <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
                         <h3 className="font-extrabold text-sm text-gray-900 mb-4">{t("My Projects")}</h3>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          {projects
-                            .filter((p) => p.team.includes(effectiveUserName))
-                            .map((p) => (
+                          {staffProjectsList.map((p) => (
                               <div key={p.id} className="p-4 bg-gray-50 rounded-xl border border-gray-100 flex justify-between items-center text-xs">
                                 <div className="flex items-center gap-2">
                                   <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: p.color }}></span>
@@ -2338,6 +2363,184 @@ const staffTasksList = tasks.filter((t) => t.assignedTo === effectiveUserName);
                     </div>
                   )}
 
+                  {/* STAFF VIEW: MY PROJECTS */}
+                  {staffView === "projects" && (
+                    <div className="space-y-6">
+                      <div>
+                        <h2 className="text-xl font-bold text-gray-900">My Projects</h2>
+                        <p className="text-xs text-gray-400 mt-1">Projects assigned to your account.</p>
+                      </div>
+
+                      {staffProjectsList.length === 0 ? (
+                        <div className="bg-white rounded-2xl border border-dashed border-gray-200 p-12 text-center">
+                          <Folder className="w-10 h-10 text-gray-300 mx-auto mb-3" />
+                          <h3 className="font-bold text-sm text-gray-700">No projects assigned yet</h3>
+                          <p className="text-xs text-gray-400 mt-1">An Admin must add you to a project before it appears here.</p>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+                          {staffProjectsList.map((project) => {
+                            const projectTasks = staffTasksList.filter(
+                              (task) => String(task.projectId) === String(project.id)
+                            );
+                            const completed = projectTasks.filter((task) => task.status === "Completed").length;
+                            return (
+                              <button
+                                key={project.id}
+                                onClick={() => {
+                                  setActiveProjectKey(String(project.id));
+                                  setStaffView("projectdetail");
+                                }}
+                                className="text-left bg-white rounded-2xl border border-gray-100 shadow-sm p-5 hover:shadow-md hover:border-blue-100 transition-all"
+                              >
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="flex items-center gap-3 min-w-0">
+                                    <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: project.color }} />
+                                    <div className="min-w-0">
+                                      <h3 className="font-extrabold text-sm text-gray-900 truncate">{project.name}</h3>
+                                      <p className="text-xs text-gray-400 mt-1 line-clamp-2">{project.description || "No description"}</p>
+                                    </div>
+                                  </div>
+                                  <ChevronRight className="w-4 h-4 text-gray-300 flex-shrink-0" />
+                                </div>
+                                <div className="mt-5 flex items-center justify-between text-xs">
+                                  <span className="text-gray-500">{completed}/{projectTasks.length} tasks completed</span>
+                                  <span className="font-bold text-blue-600">{project.progress || 0}%</span>
+                                </div>
+                                <div className="w-full h-1.5 bg-gray-100 rounded-full mt-2 overflow-hidden">
+                                  <div className="h-full rounded-full" style={{ width: `${project.progress || 0}%`, backgroundColor: project.color }} />
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* STAFF VIEW: READ-ONLY PROJECT DETAIL */}
+                  {staffView === "projectdetail" && (
+                    <div className="space-y-6">
+                      <button
+                        onClick={() => setStaffView("projects")}
+                        className="flex items-center gap-2 text-xs font-bold text-gray-500 hover:text-gray-900"
+                      >
+                        <ArrowLeft className="w-4 h-4" /> Back to My Projects
+                      </button>
+
+                      {!activeProject || !staffProjectsList.some((p) => String(p.id) === String(activeProject.id)) ? (
+                        <div className="bg-white rounded-2xl border border-dashed border-gray-200 p-12 text-center">
+                          <ShieldAlert className="w-10 h-10 text-gray-300 mx-auto mb-3" />
+                          <h3 className="font-bold text-sm text-gray-700">Project unavailable</h3>
+                          <p className="text-xs text-gray-400 mt-1">You can only open projects assigned to you.</p>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
+                            <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <span className="w-3 h-3 rounded-full" style={{ backgroundColor: activeProject.color }} />
+                                  <h2 className="text-xl font-extrabold text-gray-900">{activeProject.name}</h2>
+                                </div>
+                                <p className="text-sm text-gray-500 mt-3 max-w-3xl">{activeProject.description || "No description"}</p>
+                              </div>
+                              <span className="px-3 py-1 rounded-full text-[10px] font-bold uppercase bg-blue-50 text-blue-600">
+                                {activeProject.status}
+                              </span>
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-6 text-xs">
+                              <div className="bg-gray-50 rounded-xl p-4"><span className="text-gray-400 block">Start date</span><b className="text-gray-800 mt-1 block">{activeProject.startDate}</b></div>
+                              <div className="bg-gray-50 rounded-xl p-4"><span className="text-gray-400 block">End date</span><b className="text-gray-800 mt-1 block">{activeProject.endDate}</b></div>
+                              <div className="bg-gray-50 rounded-xl p-4"><span className="text-gray-400 block">Progress</span><b className="text-gray-800 mt-1 block">{activeProject.progress || 0}%</b></div>
+                            </div>
+                          </div>
+
+                          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
+                            <h3 className="font-extrabold text-sm text-gray-900 mb-4">My Tasks in This Project</h3>
+                            <div className="space-y-2">
+                              {staffTasksList.filter((task) => String(task.projectId) === String(activeProject.id)).length === 0 ? (
+                                <p className="text-xs text-gray-400 text-center py-8 bg-gray-50 rounded-xl border border-dashed border-gray-200">
+                                  No tasks assigned to you in this project yet.
+                                </p>
+                              ) : (
+                                staffTasksList
+                                  .filter((task) => String(task.projectId) === String(activeProject.id))
+                                  .map((task) => (
+                                    <div key={task.id} className="flex items-center justify-between gap-3 p-4 bg-gray-50 rounded-xl border border-gray-100">
+                                      <div className="flex items-center gap-3 min-w-0">
+                                        <button
+                                          onClick={() => handleToggleTaskStatus(task.id, task.status)}
+                                          className={`w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 ${
+                                            task.status === "Completed" ? "bg-green-500 border-green-500 text-white" : "border-gray-300"
+                                          }`}
+                                        >
+                                          {task.status === "Completed" && <CheckCircle2 className="w-3.5 h-3.5" />}
+                                        </button>
+                                        <div className="min-w-0">
+                                          <h4 className="text-xs font-bold text-gray-900 truncate">{task.name}</h4>
+                                          <p className="text-[10px] text-gray-400 mt-1">{task.status} · {task.date}</p>
+                                        </div>
+                                      </div>
+                                      <span className="px-2 py-1 rounded-full text-[9px] font-bold bg-orange-50 text-orange-600">{task.priority}</span>
+                                    </div>
+                                  ))
+                              )}
+                            </div>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {/* STAFF VIEW: MY TASKS */}
+                  {staffView === "tasks" && (
+                    <div className="space-y-6">
+                      <div>
+                        <h2 className="text-xl font-bold text-gray-900">My Tasks</h2>
+                        <p className="text-xs text-gray-400 mt-1">Only tasks assigned to your account are shown.</p>
+                      </div>
+
+                      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5">
+                          <h3 className="font-extrabold text-sm text-gray-900">Task List ({staffTasksList.length})</h3>
+                          <div className="flex gap-1.5 bg-gray-100 p-1 rounded-xl text-xs">
+                            <button onClick={() => setStaffFilter("all")} className={`px-3 py-1 rounded-lg font-semibold ${staffFilter === "all" ? "bg-white shadow-sm" : "text-gray-500"}`}>All</button>
+                            <button onClick={() => setStaffFilter("done")} className={`px-3 py-1 rounded-lg font-semibold ${staffFilter === "done" ? "bg-white shadow-sm" : "text-gray-500"}`}>Done</button>
+                            <button onClick={() => setStaffFilter("notdone")} className={`px-3 py-1 rounded-lg font-semibold ${staffFilter === "notdone" ? "bg-white shadow-sm" : "text-gray-500"}`}>Remaining</button>
+                          </div>
+                        </div>
+
+                        <div className="space-y-3">
+                          {getFilteredStaffTasks().length === 0 ? (
+                            <p className="text-xs text-gray-400 text-center py-10 bg-gray-50 rounded-xl border border-dashed border-gray-200">No tasks assigned yet.</p>
+                          ) : (
+                            getFilteredStaffTasks().map((task) => {
+                              const project = projects.find((p) => String(p.id) === String(task.projectId));
+                              return (
+                                <div key={task.id} className="flex items-center justify-between gap-3 p-4 bg-gray-50 rounded-xl border border-gray-100">
+                                  <div className="flex items-center gap-3 min-w-0">
+                                    <button
+                                      onClick={() => handleToggleTaskStatus(task.id, task.status)}
+                                      className={`w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 ${task.status === "Completed" ? "bg-green-500 border-green-500 text-white" : "border-gray-300"}`}
+                                    >
+                                      {task.status === "Completed" && <CheckCircle2 className="w-3.5 h-3.5" />}
+                                    </button>
+                                    <div className="min-w-0">
+                                      <h4 className={`text-xs font-bold truncate ${task.status === "Completed" ? "line-through text-gray-400" : "text-gray-900"}`}>{task.name}</h4>
+                                      <p className="text-[10px] text-gray-400 mt-1">{project?.name || "Unknown project"} · {task.status} · {task.date}</p>
+                                    </div>
+                                  </div>
+                                  <span className="px-2 py-1 rounded-full text-[9px] font-bold bg-orange-50 text-orange-600">{task.priority}</span>
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {/* STAFF VIEW: CHAT GROUPS & CONTACTS */}
                   {(staffView === "chatprojects" || staffView === "chatcontacts") && (
                     <div className="space-y-6">
@@ -2354,7 +2557,7 @@ const staffTasksList = tasks.filter((t) => t.assignedTo === effectiveUserName);
 
                           <div className="flex-1 overflow-y-auto p-3 space-y-1">
                             {staffView === "chatprojects" ? (
-                              projects.map((proj) => (
+                              staffProjectsList.map((proj) => (
                                 <div
                                   key={proj.id}
                                   onClick={() => {
