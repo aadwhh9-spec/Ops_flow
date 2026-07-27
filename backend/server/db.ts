@@ -303,6 +303,30 @@ export async function getGlobalRoom() {
   return result[0];
 }
 
+export async function getOrCreateProjectRoom(projectId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("DB not available");
+  const name = `project:${projectId}`;
+  const [existing] = await db
+    .select()
+    .from(chatRooms)
+    .where(and(eq(chatRooms.type, "global"), eq(chatRooms.name, name)))
+    .limit(1);
+  if (existing) return existing;
+  const [room] = await db.insert(chatRooms).values({ type: "global", name }).returning();
+  if (!room) throw new Error("Failed to create project chat room");
+  return room;
+}
+
+export async function getProjectRooms(projectIds: number[]) {
+  const db = await getDb();
+  if (!db || projectIds.length === 0) return [];
+  return db
+    .select()
+    .from(chatRooms)
+    .where(inArray(chatRooms.name, projectIds.map(id => `project:${id}`)));
+}
+
 export async function getOrCreateDirectRoom(userId1: number, userId2: number) {
   const db = await getDb();
   if (!db) throw new Error("DB not available");
