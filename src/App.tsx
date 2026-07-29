@@ -52,6 +52,7 @@ export default function App() {
   const [activeProjectKey, setActiveProjectKey] = useState<string>("ecommerce");
   const [activeTaskCategory, setActiveTaskCategory] = useState<"Completed" | "In Progress" | "Not Started">("Completed");
   const [staffFilter, setStaffFilter] = useState<"all" | "done" | "notdone">("all");
+  const [tasksFilterProject, setTasksFilterProject] = useState<string>("all");
 
   // Chat target state
   const [chatType, setChatType] = useState<"proj" | "dm">("proj");
@@ -103,7 +104,16 @@ export default function App() {
     }
     return key;
   };
-
+const getDaysRemaining = (endDate: string): { text: string; isOverdue: boolean } => {
+    const today = new Date();
+    const end = new Date(endDate);
+    const diffTime = end.getTime() - today.getTime();
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    if (diffDays < 0) {
+      return { text: `Overdue by ${Math.abs(diffDays)} days`, isOverdue: true };
+    }
+    return { text: `${diffDays} days remaining`, isOverdue: false };
+  };
   // Fetch full live backend database
   const fetchWorkspace = async () => {
     try {
@@ -342,8 +352,7 @@ export default function App() {
   const notStartedTasks = tasks.filter((t) => t.status === "Not Started").length;
 
   // Filter tasks based on category in admin tasks view
-  const filteredTasksForCategory = tasks.filter((t) => t.status === activeTaskCategory);
-
+const filteredTasksForCategory = tasks.filter((t) => t.status === activeTaskCategory && (tasksFilterProject === "all" || t.projectId === tasksFilterProject));
   // Active project detail object
   const activeProject = projects.find((p) => p.id === activeProjectKey) || projects[0];
 
@@ -428,7 +437,15 @@ export default function App() {
                   className="w-full px-4 py-2.5 bg-[#FAFBFD] border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all text-gray-800"
                 />
               </div>
-
+<div className="flex justify-end mb-3">
+                <button
+                  type="button"
+                  onClick={() => alert(t("Password reset link will be sent to your email (feature pending backend integration)"))}
+                  className="text-xs text-blue-600 hover:text-blue-800 hover:underline"
+                >
+                  {t("Forgot password?")}
+                </button>
+              </div>
               <div className="grid grid-cols-2 gap-3 mb-2">
                 <button
                   onClick={() => {
@@ -1221,7 +1238,12 @@ export default function App() {
                                       {proj.status}
                                     </span>
                                   </td>
-                                  <td className="p-4 text-gray-500">{proj.startDate} – {proj.endDate}</td>
+                                <td className="p-4 text-gray-500">
+  {proj.startDate} - {proj.endDate}
+  <div className={`text-[10px] font-semibold mt-1 ${getDaysRemaining(proj.endDate).isOverdue ? "text-red-500" : "text-gray-400"}`}>
+    {getDaysRemaining(proj.endDate).text}
+  </div>
+</td>
                                   <td className="p-4">
                                     <div className="flex items-center gap-2">
                                       <span className="font-bold">{proj.progress}%</span>
@@ -1515,7 +1537,7 @@ export default function App() {
                             <div>
                               <label className="block text-xs font-bold text-gray-600 uppercase mb-1 tracking-wider">{t("Start Date")}</label>
                               <input
-                                type="text"
+                                type="date"
                                 value={npStart}
                                 onChange={(e) => setNpStart(e.target.value)}
                                 placeholder="Jun 1"
@@ -1525,7 +1547,7 @@ export default function App() {
                             <div>
                               <label className="block text-xs font-bold text-gray-600 uppercase mb-1 tracking-wider">{t("End Date")}</label>
                               <input
-                                type="text"
+                                type="date"
                                 value={npEnd}
                                 onChange={(e) => setNpEnd(e.target.value)}
                                 placeholder="Aug 15"
@@ -1558,9 +1580,9 @@ export default function App() {
                               {t("Cancel")}
                             </button>
                             <button
-                              onClick={handleCreateProject}
-                              className="flex-grow py-2.5 bg-[#0E1526] hover:bg-gray-800 text-white font-bold text-xs rounded-xl shadow-sm transition-all text-center"
-                            >
+                              onClick={selectedRole === "staff" ? () => alert(t("You do not have permission to create projects.")) : handleCreateProject}
+          className={`flex-grow py-2.5 font-bold text-xs rounded-xl shadow-sm transition-colors ${selectedRole === "staff" ? "bg-gray-300 text-gray-500 cursor-not-allowed" : "bg-[#0E1526] hover:bg-gray-800 text-white"}`}
+        >
                               {t("Save Project")}
                             </button>
                           </div>
@@ -1676,6 +1698,38 @@ export default function App() {
                           <h2 className="text-xl font-bold text-gray-900 capitalize">Tasks: {t(activeTaskCategory)}</h2>
                           <p className="text-xs text-gray-500">Dispatch and verify pipeline completions</p>
                         </div>
+                        <div className="flex gap-2 mb-4">
+                    <button
+                      onClick={() => setActiveTaskCategory("Completed")}
+                      className={`px-4 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                        activeTaskCategory === "Completed"
+                          ? "bg-blue-600 text-white"
+                          : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                      }`}
+                    >
+                      {t("Completed")}
+                    </button>
+                    <button
+                      onClick={() => setActiveTaskCategory("In Progress")}
+                      className={`px-4 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                        activeTaskCategory === "In Progress"
+                          ? "bg-blue-600 text-white"
+                          : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                      }`}
+                    >
+                      {t("In Progress")}
+                    </button>
+                    <button
+                      onClick={() => setActiveTaskCategory("Not Started")}
+                      className={`px-4 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                        activeTaskCategory === "Not Started"
+                          ? "bg-blue-600 text-white"
+                          : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                      }`}
+                    >
+                      {t("Not Started")}
+                    </button>
+                  </div>
                         <span className={`px-3 py-1 bg-gray-100 rounded-full text-xs font-bold text-gray-600`}>
                           {filteredTasksForCategory.length} tasks cataloged
                         </span>
@@ -2489,9 +2543,12 @@ export default function App() {
                   onChange={(e) => setNtAssignee(e.target.value)}
                   className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-800"
                 >
-                  {members.map((m) => (
-                    <option key={m.id} value={m.name}>{m.name}</option>
-                  ))}
+                 {members
+  .filter((m) => activeProject.team.includes(m.name))
+  .map((m) => (
+    <option key={m.id} value={m.name}>{m.name}</option>
+  ))} 
+                   
                 </select>
               </div>
 
