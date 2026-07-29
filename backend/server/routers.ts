@@ -2,6 +2,7 @@ import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
+import { hashPassword, signSessionToken, verifyPassword } from "./_core/auth";
 import { systemRouter } from "./_core/systemRouter";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import {
@@ -17,6 +18,7 @@ import {
   getDashboardStats,
   getDirectRoomsForUser,
   getGlobalRoom,
+  getUserByEmail,
   getMessages,
   getNotificationsForUser,
   getOrCreateDirectRoom,
@@ -37,22 +39,23 @@ import {
   updateProject,
   updateTask,
   updateUserRole,
+  upsertUser,
 } from "./db";
 
-// ─── Admin guard ──────────────────────────────────────────────────────────────
+// â”€â”€â”€ Admin guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
   if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
   return next({ ctx });
 });
 
-// ─── Project access guard ─────────────────────────────────────────────────────
+// â”€â”€â”€ Project access guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function assertProjectAccess(projectId: number, userId: number, userRole: string) {
   if (userRole === "admin") return;
   const ok = await isProjectMember(projectId, userId);
   if (!ok) throw new TRPCError({ code: "FORBIDDEN", message: "Not a project member" });
 }
 
-// ─── Chat room access guard ───────────────────────────────────────────────────
+// â”€â”€â”€ Chat room access guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // The global room is open to any authenticated user; direct (DM) rooms require
 // the caller to actually be one of the two participants.
 async function assertRoomAccess(roomId: number, userId: number) {
@@ -65,9 +68,49 @@ async function assertRoomAccess(roomId: number, userId: number) {
 export const appRouter = router({
   system: systemRouter,
 
-  // ─── Auth ──────────────────────────────────────────────────────────────────
+  // â”€â”€â”€ Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   auth: router({
     me: publicProcedure.query(opts => opts.ctx.user),
+    login: publicProcedure
+      .input(z.object({ email: z.string().email(), password: z.string().min(1) }))
+      .mutation(async ({ ctx, input }) => {
+        const email = input.email.trim().toLowerCase();
+        const user = await getUserByEmail(email);
+        if (!user?.passwordHash || !(await verifyPassword(input.password, user.passwordHash))) {
+          throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid email or password" });
+        }
+
+        const token = await signSessionToken(user.openId);
+        ctx.res.cookie(COOKIE_NAME, token, getSessionCookieOptions(ctx.req));
+        return { success: true, user } as const;
+      }),
+    register: publicProcedure
+      .input(z.object({
+        name: z.string().trim().min(1).max(255),
+        email: z.string().email(),
+        password: z.string().min(1),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const email = input.email.trim().toLowerCase();
+        if (await getUserByEmail(email)) {
+          throw new TRPCError({ code: "CONFLICT", message: "An account with this email already exists" });
+        }
+
+        await upsertUser({
+          openId: email,
+          name: input.name,
+          email,
+          loginMethod: "password",
+          passwordHash: await hashPassword(input.password),
+          lastSignedIn: new Date(),
+        });
+        const user = await getUserByEmail(email);
+        if (!user) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to create account" });
+
+        const token = await signSessionToken(user.openId);
+        ctx.res.cookie(COOKIE_NAME, token, getSessionCookieOptions(ctx.req));
+        return { success: true, user } as const;
+      }),
     logout: publicProcedure.mutation(({ ctx }) => {
       const cookieOptions = getSessionCookieOptions(ctx.req);
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
@@ -75,7 +118,7 @@ export const appRouter = router({
     }),
   }),
 
-  // ─── Users ─────────────────────────────────────────────────────────────────
+  // â”€â”€â”€ Users â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   users: router({
     list: protectedProcedure.query(async () => {
       return getAllUsers();
@@ -88,7 +131,7 @@ export const appRouter = router({
       }),
   }),
 
-  // ─── Projects ──────────────────────────────────────────────────────────────
+  // â”€â”€â”€ Projects â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   projects: router({
     list: protectedProcedure.query(async ({ ctx }) => {
       if (ctx.user.role === "admin") return getAllProjects();
@@ -187,7 +230,7 @@ export const appRouter = router({
       }),
   }),
 
-  // ─── Tasks ─────────────────────────────────────────────────────────────────
+  // â”€â”€â”€ Tasks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   tasks: router({
     list: protectedProcedure
       .input(z.object({
@@ -336,7 +379,7 @@ export const appRouter = router({
       }),
   }),
 
-  // ─── Chat ───────────────────────────────────────────────────────────────────
+  // â”€â”€â”€ Chat â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   chat: router({
     getGlobalRoom: protectedProcedure.query(async () => {
       return getGlobalRoom();
@@ -363,7 +406,7 @@ export const appRouter = router({
       }),
   }),
 
-  // ─── Notifications ──────────────────────────────────────────────────────────
+  // â”€â”€â”€ Notifications â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   notifications: router({
     list: protectedProcedure.query(async ({ ctx }) => {
       return getNotificationsForUser(ctx.user.id);
@@ -383,7 +426,7 @@ export const appRouter = router({
     }),
   }),
 
-  // ─── Dashboard ──────────────────────────────────────────────────────────────
+  // â”€â”€â”€ Dashboard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   dashboard: router({
     stats: protectedProcedure.query(async ({ ctx }) => {
       return getDashboardStats(ctx.user.id);

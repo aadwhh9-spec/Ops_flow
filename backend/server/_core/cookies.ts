@@ -1,11 +1,11 @@
 import type { Request } from "express";
 import { ENV } from "./env";
 
-export const COOKIE_NAME = "opsflow_session";
+export { COOKIE_NAME } from "@shared/const";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
-// req is accepted (and typed) for future flexibility — e.g. if you later need
+// req is accepted (and typed) for future flexibility â€” e.g. if you later need
 // to vary cookie options based on the request's host/protocol behind a proxy.
 export function getSessionCookieOptions(_req: Request) {
   return {
