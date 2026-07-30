@@ -1,4 +1,5 @@
-﻿import { Router, type Request, type Response } from "express";
+﻿import { GoogleGenAI } from "@google/genai";
+import { Router, type Request, type Response } from "express";
 import { COOKIE_NAME } from "@shared/const";
 import { hashPassword, signSessionToken, verifyPassword } from "./_core/auth";
 import { getSessionCookieOptions } from "./_core/cookies";
@@ -447,54 +448,36 @@ compatibilityRouter.post("/ai/ask", async (req, res, next) => {
     const question = String(req.body.question ?? "").trim();
     if (!question)
       return res.status(400).json({ error: "Question is required" });
+    
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey)
-      return res
-        .status(503)
-        .json({ error: "GEMINI_API_KEY is not configured" });
+      return res.status(503).json({ error: "GEMINI_API_KEY is not configured" });
 
     const [projects, tasks, users] = await Promise.all([
       user.role === "admin" ? getAllProjects() : getProjectsForUser(user.id),
       user.role === "admin" ? getAllTasks() : getAllTasksForUser(user.id),
       getAllUsers(),
     ]);
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          systemInstruction: {
-            parts: [
-              {
-                text: `You are OpsFlow Assistant. Reply in the user's language. Be concise and use this live workspace data:\n${JSON.stringify({ projects, tasks, users })}`,
-              },
-            ],
-          },
-          contents: [{ role: "user", parts: [{ text: question }] }],
-        }),
-      },
-    );
-    if (!response.ok) {
-      const detail = await response.text();
-      console.error("Gemini API error:", response.status, detail);
-      return res
-        .status(502)
-        .json({ error: "Failed to communicate with Gemini" });
+
+    // التهيئة الرسمية للذكاء الاصطناعي
+    const ai = new GoogleGenAI({ apiKey });
+    
+    const response = await ai.models.generateContent({
+      model: "gemini-3.1-flash-lite",
+      contents: question,
+      config: {
+        systemInstruction: `You are OpsFlow Assistant. Reply in the user's language. Be concise and use this live workspace data:\n${JSON.stringify({ projects, tasks, users })}`,
+        temperature: 0.7,
+      }
+    });
+
+    if (!response.text) {
+      return res.status(502).json({ error: "Gemini returned an empty response" });
     }
-    const payload = (await response.json()) as {
-      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-    };
-    const answer = payload.candidates?.[0]?.content?.parts
-      ?.map((part) => part.text ?? "")
-      .join("")
-      .trim();
-    if (!answer)
-      return res
-        .status(502)
-        .json({ error: "Gemini returned an empty response" });
-    return res.json({ answer });
+
+    return res.json({ answer: response.text });
   } catch (error) {
+    console.error("Gemini SDK Error:", error);
     next(error);
   }
 });
