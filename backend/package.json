@@ -19,7 +19,7 @@
     "@trpc/server": "^11.6.0",
     "cookie": "^1.0.2",
     "dotenv": "^17.2.2",
-    "drizzle-orm": "^0.44.7",
+    "drizzle-orm": "^0.45.2",
     "express": "^4.21.2",
     "jose": "6.1.0",
     "mysql2": "^3.15.0",
@@ -37,6 +37,6 @@
     "prettier": "^3.6.2",
     "tsx": "^4.19.1",
     "typescript": "5.9.3",
-    "vitest": "^2.1.4"
+    "vitest": "^4.1.10"
   }
 }

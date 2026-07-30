@@ -41,18 +41,25 @@ import {
   updateUserRole,
   upsertUser,
 } from "./db";
+import { isAcceptablePassword, toPublicUser } from "./security";
 
 // â”€â”€â”€ Admin guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
-  if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
+  if (ctx.user.role !== "admin")
+    throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
   return next({ ctx });
 });
 
 // â”€â”€â”€ Project access guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-async function assertProjectAccess(projectId: number, userId: number, userRole: string) {
+async function assertProjectAccess(
+  projectId: number,
+  userId: number,
+  userRole: string,
+) {
   if (userRole === "admin") return;
   const ok = await isProjectMember(projectId, userId);
-  if (!ok) throw new TRPCError({ code: "FORBIDDEN", message: "Not a project member" });
+  if (!ok)
+    throw new TRPCError({ code: "FORBIDDEN", message: "Not a project member" });
 }
 
 // â”€â”€â”€ Chat room access guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -62,7 +69,11 @@ async function assertRoomAccess(roomId: number, userId: number) {
   const global = await getGlobalRoom();
   if (global && global.id === roomId) return;
   const ok = await isRoomMember(roomId, userId);
-  if (!ok) throw new TRPCError({ code: "FORBIDDEN", message: "Not a member of this room" });
+  if (!ok)
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: "Not a member of this room",
+    });
 }
 
 export const appRouter = router({
@@ -70,30 +81,48 @@ export const appRouter = router({
 
   // â”€â”€â”€ Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   auth: router({
-    me: publicProcedure.query(opts => opts.ctx.user),
+    me: publicProcedure.query((opts) => opts.ctx.user),
     login: publicProcedure
-      .input(z.object({ email: z.string().email(), password: z.string().min(1) }))
+      .input(
+        z.object({ email: z.string().email(), password: z.string().min(1) }),
+      )
       .mutation(async ({ ctx, input }) => {
         const email = input.email.trim().toLowerCase();
         const user = await getUserByEmail(email);
-        if (!user?.passwordHash || !(await verifyPassword(input.password, user.passwordHash))) {
-          throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid email or password" });
+        if (
+          !user?.passwordHash ||
+          !(await verifyPassword(input.password, user.passwordHash))
+        ) {
+          throw new TRPCError({
+            code: "UNAUTHORIZED",
+            message: "Invalid email or password",
+          });
         }
 
         const token = await signSessionToken(user.openId);
         ctx.res.cookie(COOKIE_NAME, token, getSessionCookieOptions(ctx.req));
-        return { success: true, user } as const;
+        return { success: true, user: toPublicUser(user) } as const;
       }),
     register: publicProcedure
-      .input(z.object({
-        name: z.string().trim().min(1).max(255),
-        email: z.string().email(),
-        password: z.string().min(1),
-      }))
+      .input(
+        z.object({
+          name: z.string().trim().min(1).max(255),
+          email: z.string().email(),
+          password: z
+            .string()
+            .refine(
+              isAcceptablePassword,
+              "Password must be at least 8 characters",
+            ),
+        }),
+      )
       .mutation(async ({ ctx, input }) => {
         const email = input.email.trim().toLowerCase();
         if (await getUserByEmail(email)) {
-          throw new TRPCError({ code: "CONFLICT", message: "An account with this email already exists" });
+          throw new TRPCError({
+            code: "CONFLICT",
+            message: "An account with this email already exists",
+          });
         }
 
         await upsertUser({
@@ -105,11 +134,15 @@ export const appRouter = router({
           lastSignedIn: new Date(),
         });
         const user = await getUserByEmail(email);
-        if (!user) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to create account" });
+        if (!user)
+          throw new TRPCError({
+            code: "INTERNAL_SERVER_ERROR",
+            message: "Failed to create account",
+          });
 
         const token = await signSessionToken(user.openId);
         ctx.res.cookie(COOKIE_NAME, token, getSessionCookieOptions(ctx.req));
-        return { success: true, user } as const;
+        return { success: true, user: toPublicUser(user) } as const;
       }),
     logout: publicProcedure.mutation(({ ctx }) => {
       const cookieOptions = getSessionCookieOptions(ctx.req);
@@ -121,7 +154,7 @@ export const appRouter = router({
   // â”€â”€â”€ Users â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   users: router({
     list: protectedProcedure.query(async () => {
-      return getAllUsers();
+      return (await getAllUsers()).map(toPublicUser);
     }),
     updateRole: adminProcedure
       .input(z.object({ userId: z.number(), role: z.enum(["user", "admin"]) }))
@@ -143,12 +176,14 @@ export const appRouter = router({
         await assertProjectAccess(input.id, ctx.user.id, ctx.user.role);
         return getProjectById(input.id);
       }),
-    create: protectedProcedure
-      .input(z.object({
-        name: z.string().min(1).max(255),
-        description: z.string().optional(),
-        color: z.string().optional(),
-      }))
+    create: adminProcedure
+      .input(
+        z.object({
+          name: z.string().min(1).max(255),
+          description: z.string().optional(),
+          color: z.string().optional(),
+        }),
+      )
       .mutation(async ({ ctx, input }) => {
         const project = await createProject({
           name: input.name,
@@ -165,12 +200,14 @@ export const appRouter = router({
         return project;
       }),
     update: protectedProcedure
-      .input(z.object({
-        id: z.number(),
-        name: z.string().min(1).max(255).optional(),
-        description: z.string().optional(),
-        color: z.string().optional(),
-      }))
+      .input(
+        z.object({
+          id: z.number(),
+          name: z.string().min(1).max(255).optional(),
+          description: z.string().optional(),
+          color: z.string().optional(),
+        }),
+      )
       .mutation(async ({ ctx, input }) => {
         const project = await getProjectById(input.id);
         if (!project) throw new TRPCError({ code: "NOT_FOUND" });
@@ -197,17 +234,23 @@ export const appRouter = router({
         return getProjectMembers(input.projectId);
       }),
     addMember: protectedProcedure
-      .input(z.object({
-        projectId: z.number(),
-        userId: z.number(),
-        role: z.enum(["viewer", "member", "manager"]).optional(),
-      }))
+      .input(
+        z.object({
+          projectId: z.number(),
+          userId: z.number(),
+          role: z.enum(["viewer", "member", "manager"]).optional(),
+        }),
+      )
       .mutation(async ({ ctx, input }) => {
         const project = await getProjectById(input.projectId);
         if (!project) throw new TRPCError({ code: "NOT_FOUND" });
         if (ctx.user.role !== "admin" && project.ownerId !== ctx.user.id)
           throw new TRPCError({ code: "FORBIDDEN" });
-        await addProjectMember(input.projectId, input.userId, input.role ?? "member");
+        await addProjectMember(
+          input.projectId,
+          input.userId,
+          input.role ?? "member",
+        );
         await createNotification({
           userId: input.userId,
           type: "project_added",
@@ -233,16 +276,24 @@ export const appRouter = router({
   // â”€â”€â”€ Tasks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   tasks: router({
     list: protectedProcedure
-      .input(z.object({
-        projectId: z.number().optional(),
-        status: z.string().optional(),
-        priority: z.string().optional(),
-        assigneeId: z.number().optional(),
-        search: z.string().optional(),
-      }).optional())
+      .input(
+        z
+          .object({
+            projectId: z.number().optional(),
+            status: z.string().optional(),
+            priority: z.string().optional(),
+            assigneeId: z.number().optional(),
+            search: z.string().optional(),
+          })
+          .optional(),
+      )
       .query(async ({ ctx, input }) => {
         if (input?.projectId) {
-          await assertProjectAccess(input.projectId, ctx.user.id, ctx.user.role);
+          await assertProjectAccess(
+            input.projectId,
+            ctx.user.id,
+            ctx.user.role,
+          );
           return getTasksForProject(input.projectId, input);
         }
         return getAllTasksForUser(ctx.user.id, input);
@@ -256,15 +307,17 @@ export const appRouter = router({
         return task;
       }),
     create: protectedProcedure
-      .input(z.object({
-        title: z.string().min(1).max(512),
-        description: z.string().optional(),
-        projectId: z.number(),
-        assigneeId: z.number().optional(),
-        priority: z.enum(["low", "medium", "high", "urgent"]).optional(),
-        startDate: z.string().optional(),
-        dueDate: z.string().optional(),
-      }))
+      .input(
+        z.object({
+          title: z.string().min(1).max(512),
+          description: z.string().optional(),
+          projectId: z.number(),
+          assigneeId: z.number().optional(),
+          priority: z.enum(["low", "medium", "high", "urgent"]).optional(),
+          startDate: z.string().optional(),
+          dueDate: z.string().optional(),
+        }),
+      )
       .mutation(async ({ ctx, input }) => {
         await assertProjectAccess(input.projectId, ctx.user.id, ctx.user.role);
         const task = await createTask({
@@ -298,24 +351,30 @@ export const appRouter = router({
         return task;
       }),
     update: protectedProcedure
-      .input(z.object({
-        id: z.number(),
-        title: z.string().min(1).max(512).optional(),
-        description: z.string().optional(),
-        status: z.enum(["pending", "approval", "processing", "done"]).optional(),
-        priority: z.enum(["low", "medium", "high", "urgent"]).optional(),
-        assigneeId: z.number().nullable().optional(),
-        startDate: z.string().nullable().optional(),
-        dueDate: z.string().nullable().optional(),
-      }))
+      .input(
+        z.object({
+          id: z.number(),
+          title: z.string().min(1).max(512).optional(),
+          description: z.string().optional(),
+          status: z
+            .enum(["pending", "approval", "processing", "done"])
+            .optional(),
+          priority: z.enum(["low", "medium", "high", "urgent"]).optional(),
+          assigneeId: z.number().nullable().optional(),
+          startDate: z.string().nullable().optional(),
+          dueDate: z.string().nullable().optional(),
+        }),
+      )
       .mutation(async ({ ctx, input }) => {
         const task = await getTaskById(input.id);
         if (!task) throw new TRPCError({ code: "NOT_FOUND" });
         await assertProjectAccess(task.projectId, ctx.user.id, ctx.user.role);
         const { id, startDate, dueDate, assigneeId, ...rest } = input;
         const updateData: any = { ...rest };
-        if (startDate !== undefined) updateData.startDate = startDate ? new Date(startDate) : null;
-        if (dueDate !== undefined) updateData.dueDate = dueDate ? new Date(dueDate) : null;
+        if (startDate !== undefined)
+          updateData.startDate = startDate ? new Date(startDate) : null;
+        if (dueDate !== undefined)
+          updateData.dueDate = dueDate ? new Date(dueDate) : null;
         if (assigneeId !== undefined) updateData.assigneeId = assigneeId;
         await updateTask(id, updateData);
 
@@ -338,7 +397,11 @@ export const appRouter = router({
               actorId: ctx.user.id,
             });
           }
-          if (task.creatorId && task.creatorId !== ctx.user.id && task.creatorId !== task.assigneeId) {
+          if (
+            task.creatorId &&
+            task.creatorId !== ctx.user.id &&
+            task.creatorId !== task.assigneeId
+          ) {
             await createNotification({
               userId: task.creatorId,
               type: "task_status_changed",
@@ -350,7 +413,11 @@ export const appRouter = router({
           }
         }
         // Notification for assignment change
-        if (input.assigneeId && input.assigneeId !== task.assigneeId && input.assigneeId !== ctx.user.id) {
+        if (
+          input.assigneeId &&
+          input.assigneeId !== task.assigneeId &&
+          input.assigneeId !== ctx.user.id
+        ) {
           await createNotification({
             userId: input.assigneeId,
             type: "task_assigned",
@@ -402,7 +469,11 @@ export const appRouter = router({
       .input(z.object({ roomId: z.number(), content: z.string().min(1) }))
       .mutation(async ({ ctx, input }) => {
         await assertRoomAccess(input.roomId, ctx.user.id);
-        return sendMessage({ roomId: input.roomId, senderId: ctx.user.id, content: input.content });
+        return sendMessage({
+          roomId: input.roomId,
+          senderId: ctx.user.id,
+          content: input.content,
+        });
       }),
   }),
 

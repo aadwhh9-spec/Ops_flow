@@ -13,6 +13,7 @@ import {
   getAllTasksForUser,
   getAllUsers,
   getProjectMembers,
+  getProjectById,
   getProjectRooms,
   getProjectsForUser,
   getTaskById,
@@ -26,18 +27,15 @@ import {
   updateTask,
   upsertUser,
 } from "./db";
+import { isAcceptablePassword, toPublicUser } from "./security";
 
 export const compatibilityRouter = Router();
+const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const MAX_LOGIN_ATTEMPTS = 5;
 
-function publicUser(
-  user: NonNullable<Awaited<ReturnType<typeof getUserByEmail>>>,
-) {
-  return {
-    id: user.id,
-    name: user.name ?? user.email ?? "Member",
-    email: user.email ?? "",
-    role: user.role,
-  };
+function loginAttemptKey(req: Request, email: string) {
+  return `${req.ip}:${email}`;
 }
 
 async function authenticatedUser(req: Request, res: Response) {
@@ -99,7 +97,7 @@ compatibilityRouter.get("/auth/me", async (req, res, next) => {
   try {
     const user = await authenticatedUser(req, res);
     if (!user) return res.status(401).json({ error: "You must be logged in" });
-    return res.json({ user: publicUser(user) });
+    return res.json({ user: toPublicUser(user) });
   } catch (error) {
     next(error);
   }
@@ -114,18 +112,39 @@ compatibilityRouter.post("/auth/login", async (req, res, next) => {
     if (!email || !password) {
       return res.status(400).json({ error: "Email and password are required" });
     }
+    const attemptKey = loginAttemptKey(req, email);
+    const now = Date.now();
+    const attempt = loginAttempts.get(attemptKey);
+    if (
+      attempt &&
+      attempt.resetAt > now &&
+      attempt.count >= MAX_LOGIN_ATTEMPTS
+    ) {
+      return res
+        .status(429)
+        .json({ error: "Too many login attempts. Try again later." });
+    }
 
     const user = await getUserByEmail(email);
     if (
       !user?.passwordHash ||
       !(await verifyPassword(password, user.passwordHash))
     ) {
+      const activeAttempt =
+        attempt && attempt.resetAt > now
+          ? attempt
+          : { count: 0, resetAt: now + LOGIN_WINDOW_MS };
+      loginAttempts.set(attemptKey, {
+        count: activeAttempt.count + 1,
+        resetAt: activeAttempt.resetAt,
+      });
       return res.status(401).json({ error: "Invalid email or password" });
     }
 
+    loginAttempts.delete(attemptKey);
     const token = await signSessionToken(user.openId);
     res.cookie(COOKIE_NAME, token, getSessionCookieOptions(req));
-    return res.json({ user: publicUser(user) });
+    return res.json({ user: toPublicUser(user) });
   } catch (error) {
     next(error);
   }
@@ -142,6 +161,11 @@ compatibilityRouter.post("/auth/register", async (req, res, next) => {
       return res
         .status(400)
         .json({ error: "Name, email and password are required" });
+    }
+    if (!isAcceptablePassword(password)) {
+      return res
+        .status(400)
+        .json({ error: "Password must be at least 8 characters" });
     }
     if (await getUserByEmail(email)) {
       return res
@@ -162,7 +186,7 @@ compatibilityRouter.post("/auth/register", async (req, res, next) => {
 
     const token = await signSessionToken(user.openId);
     res.cookie(COOKIE_NAME, token, getSessionCookieOptions(req));
-    return res.status(201).json({ user: publicUser(user) });
+    return res.status(201).json({ user: toPublicUser(user) });
   } catch (error) {
     next(error);
   }
@@ -395,8 +419,10 @@ compatibilityRouter.post("/projects/:id/team", async (req, res, next) => {
       return res
         .status(400)
         .json({ error: "Project and member name are required" });
-    if (user.role !== "admin" && !(await isProjectMember(projectId, user.id))) {
-      return res.status(403).json({ error: "Not a project member" });
+    const project = await getProjectById(projectId);
+    if (!project) return res.status(404).json({ error: "Project not found" });
+    if (user.role !== "admin" && project.ownerId !== user.id) {
+      return res.status(403).json({ error: "Project owner access required" });
     }
     const member = (await getAllUsers()).find(
       (candidate) => candidate.name === req.body.name,
@@ -448,31 +474,40 @@ compatibilityRouter.post("/ai/ask", async (req, res, next) => {
     const question = String(req.body.question ?? "").trim();
     if (!question)
       return res.status(400).json({ error: "Question is required" });
-    
+
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey)
-      return res.status(503).json({ error: "GEMINI_API_KEY is not configured" });
+      return res
+        .status(503)
+        .json({ error: "GEMINI_API_KEY is not configured" });
 
     const [projects, tasks, users] = await Promise.all([
       user.role === "admin" ? getAllProjects() : getProjectsForUser(user.id),
       user.role === "admin" ? getAllTasks() : getAllTasksForUser(user.id),
       getAllUsers(),
     ]);
+    const aiUsers = users.map((member) => ({
+      id: member.id,
+      name: member.name ?? "Member",
+      role: member.role,
+    }));
 
     // التهيئة الرسمية للذكاء الاصطناعي
     const ai = new GoogleGenAI({ apiKey });
-    
+
     const response = await ai.models.generateContent({
       model: "gemini-3.1-flash-lite",
       contents: question,
       config: {
-        systemInstruction: `You are OpsFlow Assistant. Reply in the user's language. Be concise and use this live workspace data:\n${JSON.stringify({ projects, tasks, users })}`,
+        systemInstruction: `You are OpsFlow Assistant. Reply in the user's language. Be concise and use this live workspace data:\n${JSON.stringify({ projects, tasks, users: aiUsers })}`,
         temperature: 0.7,
-      }
+      },
     });
 
     if (!response.text) {
-      return res.status(502).json({ error: "Gemini returned an empty response" });
+      return res
+        .status(502)
+        .json({ error: "Gemini returned an empty response" });
     }
 
     return res.json({ answer: response.text });
