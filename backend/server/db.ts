@@ -24,12 +24,8 @@ let _db: ReturnType<typeof drizzle> | null = null;
 let _client: postgres.Sql | null = null;
 
 export async function getDb() {
-  if (!process.env.DATABASE_URL) {
-    throw new Error("DATABASE_URL is missing. Add it to backend/.env");
-  }
-
   if (!_db) {
-    _client = postgres(process.env.DATABASE_URL, { prepare: false });
+    _client = postgres(ENV.databaseUrl, { prepare: false });
     _db = drizzle({ client: _client });
   }
 
@@ -45,7 +41,13 @@ export async function upsertUser(user: InsertUser): Promise<void> {
   const values: InsertUser = { openId: user.openId };
   const updateSet: Record<string, unknown> = {};
 
-  const fields = ["name", "email", "loginMethod", "avatarUrl", "passwordHash"] as const;
+  const fields = [
+    "name",
+    "email",
+    "loginMethod",
+    "avatarUrl",
+    "passwordHash",
+  ] as const;
   for (const field of fields) {
     const val = user[field];
     if (val !== undefined) {
@@ -69,25 +71,30 @@ export async function upsertUser(user: InsertUser): Promise<void> {
   if (!values.lastSignedIn) values.lastSignedIn = new Date();
   if (Object.keys(updateSet).length === 0) updateSet.lastSignedIn = new Date();
 
-  await db
-    .insert(users)
-    .values(values)
-    .onConflictDoUpdate({
-      target: users.openId,
-      set: updateSet,
-    });
+  await db.insert(users).values(values).onConflictDoUpdate({
+    target: users.openId,
+    set: updateSet,
+  });
 }
 
 export async function getUserByOpenId(openId: string) {
   const db = await getDb();
   if (!db) return undefined;
-  const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
+  const result = await db
+    .select()
+    .from(users)
+    .where(eq(users.openId, openId))
+    .limit(1);
   return result[0];
 }
 
 export async function getUserByEmail(email: string) {
   const db = await getDb();
-  const result = await db.select().from(users).where(eq(users.email, email)).limit(1);
+  const result = await db
+    .select()
+    .from(users)
+    .where(eq(users.email, email))
+    .limit(1);
   return result[0];
 }
 
@@ -122,15 +129,44 @@ export async function createProject(data: InsertProject) {
   return project;
 }
 
+async function getAccessibleProjectIds(userId: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  const [ownedRows, memberRows, assignedRows] = await Promise.all([
+    db
+      .select({ projectId: projects.id })
+      .from(projects)
+      .where(eq(projects.ownerId, userId)),
+    db
+      .select({ projectId: projectMembers.projectId })
+      .from(projectMembers)
+      .where(eq(projectMembers.userId, userId)),
+    db
+      .selectDistinct({ projectId: tasks.projectId })
+      .from(tasks)
+      .where(eq(tasks.assigneeId, userId)),
+  ]);
+
+  return [
+    ...new Set(
+      [...ownedRows, ...memberRows, ...assignedRows].map(
+        (row) => row.projectId,
+      ),
+    ),
+  ];
+}
+
 export async function getProjectsForUser(userId: number) {
   const db = await getDb();
   if (!db) return [];
-  // Get all project IDs the user is a member of
-  const memberRows = await db.select({ projectId: projectMembers.projectId })
-    .from(projectMembers).where(eq(projectMembers.userId, userId));
-  const ids = memberRows.map(r => r.projectId);
+  const ids = await getAccessibleProjectIds(userId);
   if (ids.length === 0) return [];
-  return db.select().from(projects).where(inArray(projects.id, ids)).orderBy(desc(projects.createdAt));
+  return db
+    .select()
+    .from(projects)
+    .where(inArray(projects.id, ids))
+    .orderBy(desc(projects.createdAt));
 }
 
 export async function getAllProjects() {
@@ -142,14 +178,21 @@ export async function getAllProjects() {
 export async function getProjectById(id: number) {
   const db = await getDb();
   if (!db) return undefined;
-  const result = await db.select().from(projects).where(eq(projects.id, id)).limit(1);
+  const result = await db
+    .select()
+    .from(projects)
+    .where(eq(projects.id, id))
+    .limit(1);
   return result[0];
 }
 
 export async function updateProject(id: number, data: Partial<InsertProject>) {
   const db = await getDb();
   if (!db) return;
-  await db.update(projects).set({ ...data, updatedAt: new Date() }).where(eq(projects.id, id));
+  await db
+    .update(projects)
+    .set({ ...data, updatedAt: new Date() })
+    .where(eq(projects.id, id));
 }
 
 export async function deleteProject(id: number) {
@@ -171,7 +214,11 @@ export async function getProjectMembers(projectId: number) {
   return rows;
 }
 
-export async function addProjectMember(projectId: number, userId: number, role: "viewer" | "member" | "manager" = "member") {
+export async function addProjectMember(
+  projectId: number,
+  userId: number,
+  role: "viewer" | "member" | "manager" = "member",
+) {
   const db = await getDb();
   if (!db) return;
   await db
@@ -186,16 +233,24 @@ export async function addProjectMember(projectId: number, userId: number, role: 
 export async function removeProjectMember(projectId: number, userId: number) {
   const db = await getDb();
   if (!db) return;
-  await db.delete(projectMembers)
-    .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, userId)));
+  await db
+    .delete(projectMembers)
+    .where(
+      and(
+        eq(projectMembers.projectId, projectId),
+        eq(projectMembers.userId, userId),
+      ),
+    );
 }
 
-export async function isProjectMember(projectId: number, userId: number): Promise<boolean> {
+export async function isProjectMember(
+  projectId: number,
+  userId: number,
+): Promise<boolean> {
   const db = await getDb();
   if (!db) return false;
-  const result = await db.select({ id: projectMembers.id }).from(projectMembers)
-    .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, userId))).limit(1);
-  return result.length > 0;
+  const ids = await getAccessibleProjectIds(userId);
+  return ids.includes(projectId);
 }
 
 // â”€â”€â”€ Tasks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -212,53 +267,92 @@ export async function createTask(data: InsertTask) {
   return task;
 }
 
-export async function getTasksForProject(projectId: number, filters?: { status?: string; priority?: string; assigneeId?: number; search?: string }) {
+export async function getTasksForProject(
+  projectId: number,
+  filters?: {
+    status?: string;
+    priority?: string;
+    assigneeId?: number;
+    search?: string;
+  },
+) {
   const db = await getDb();
   if (!db) return [];
   const conditions = [eq(tasks.projectId, projectId)];
   if (filters?.status) conditions.push(eq(tasks.status, filters.status as any));
-  if (filters?.priority) conditions.push(eq(tasks.priority, filters.priority as any));
-  if (filters?.assigneeId) conditions.push(eq(tasks.assigneeId, filters.assigneeId));
-  if (filters?.search) conditions.push(like(tasks.title, `%${filters.search}%`));
-  return db.select().from(tasks).where(and(...conditions)).orderBy(desc(tasks.createdAt));
+  if (filters?.priority)
+    conditions.push(eq(tasks.priority, filters.priority as any));
+  if (filters?.assigneeId)
+    conditions.push(eq(tasks.assigneeId, filters.assigneeId));
+  if (filters?.search)
+    conditions.push(like(tasks.title, `%${filters.search}%`));
+  return db
+    .select()
+    .from(tasks)
+    .where(and(...conditions))
+    .orderBy(desc(tasks.createdAt));
 }
 
 export async function getTasksForUser(userId: number) {
   const db = await getDb();
   if (!db) return [];
-  // Get tasks in user's projects
-  const memberRows = await db.select({ projectId: projectMembers.projectId })
-    .from(projectMembers).where(eq(projectMembers.userId, userId));
-  const ids = memberRows.map(r => r.projectId);
+  const ids = await getAccessibleProjectIds(userId);
   if (ids.length === 0) return [];
-  return db.select().from(tasks).where(inArray(tasks.projectId, ids)).orderBy(desc(tasks.createdAt));
+  return db
+    .select()
+    .from(tasks)
+    .where(inArray(tasks.projectId, ids))
+    .orderBy(desc(tasks.createdAt));
 }
 
-export async function getAllTasksForUser(userId: number, filters?: { status?: string; priority?: string; search?: string; projectId?: number }) {
+export async function getAllTasksForUser(
+  userId: number,
+  filters?: {
+    status?: string;
+    priority?: string;
+    search?: string;
+    projectId?: number;
+  },
+) {
   const db = await getDb();
   if (!db) return [];
-  const memberRows = await db.select({ projectId: projectMembers.projectId })
-    .from(projectMembers).where(eq(projectMembers.userId, userId));
-  const ids = memberRows.map(r => r.projectId);
+  const ids = await getAccessibleProjectIds(userId);
   if (ids.length === 0) return [];
   const conditions = [inArray(tasks.projectId, ids)];
   if (filters?.status) conditions.push(eq(tasks.status, filters.status as any));
-  if (filters?.priority) conditions.push(eq(tasks.priority, filters.priority as any));
-  if (filters?.search) conditions.push(like(tasks.title, `%${filters.search}%`));
-  if (filters?.projectId) conditions.push(eq(tasks.projectId, filters.projectId));
-  return db.select().from(tasks).where(and(...conditions)).orderBy(desc(tasks.createdAt));
+  if (filters?.priority)
+    conditions.push(eq(tasks.priority, filters.priority as any));
+  if (filters?.search)
+    conditions.push(like(tasks.title, `%${filters.search}%`));
+  if (filters?.projectId)
+    conditions.push(eq(tasks.projectId, filters.projectId));
+  return db
+    .select()
+    .from(tasks)
+    .where(and(...conditions))
+    .orderBy(desc(tasks.createdAt));
 }
 
-export async function getAllTasks(filters?: { status?: string; priority?: string; search?: string; projectId?: number; assigneeId?: number }) {
+export async function getAllTasks(filters?: {
+  status?: string;
+  priority?: string;
+  search?: string;
+  projectId?: number;
+  assigneeId?: number;
+}) {
   const db = await getDb();
   if (!db) return [];
 
   const conditions = [];
   if (filters?.status) conditions.push(eq(tasks.status, filters.status as any));
-  if (filters?.priority) conditions.push(eq(tasks.priority, filters.priority as any));
-  if (filters?.search) conditions.push(like(tasks.title, `%${filters.search}%`));
-  if (filters?.projectId) conditions.push(eq(tasks.projectId, filters.projectId));
-  if (filters?.assigneeId) conditions.push(eq(tasks.assigneeId, filters.assigneeId));
+  if (filters?.priority)
+    conditions.push(eq(tasks.priority, filters.priority as any));
+  if (filters?.search)
+    conditions.push(like(tasks.title, `%${filters.search}%`));
+  if (filters?.projectId)
+    conditions.push(eq(tasks.projectId, filters.projectId));
+  if (filters?.assigneeId)
+    conditions.push(eq(tasks.assigneeId, filters.assigneeId));
 
   const query = db.select().from(tasks);
   return conditions.length > 0
@@ -277,7 +371,8 @@ export async function updateTask(id: number, data: Partial<InsertTask>) {
   const db = await getDb();
   if (!db) return;
   const updateData: any = { ...data, updatedAt: new Date() };
-  if (data.status === "done" && !data.completedAt) updateData.completedAt = new Date();
+  if (data.status === "done" && !data.completedAt)
+    updateData.completedAt = new Date();
   if (data.status && data.status !== "done") updateData.completedAt = null;
   await db.update(tasks).set(updateData).where(eq(tasks.id, id));
 
@@ -299,7 +394,11 @@ export async function deleteTask(id: number) {
 export async function getGlobalRoom() {
   const db = await getDb();
   if (!db) return undefined;
-  const result = await db.select().from(chatRooms).where(eq(chatRooms.type, "global")).limit(1);
+  const result = await db
+    .select()
+    .from(chatRooms)
+    .where(eq(chatRooms.type, "global"))
+    .limit(1);
   return result[0];
 }
 
@@ -313,7 +412,10 @@ export async function getOrCreateProjectRoom(projectId: number) {
     .where(and(eq(chatRooms.type, "global"), eq(chatRooms.name, name)))
     .limit(1);
   if (existing) return existing;
-  const [room] = await db.insert(chatRooms).values({ type: "global", name }).returning();
+  const [room] = await db
+    .insert(chatRooms)
+    .values({ type: "global", name })
+    .returning();
   if (!room) throw new Error("Failed to create project chat room");
   return room;
 }
@@ -324,29 +426,50 @@ export async function getProjectRooms(projectIds: number[]) {
   return db
     .select()
     .from(chatRooms)
-    .where(inArray(chatRooms.name, projectIds.map(id => `project:${id}`)));
+    .where(
+      inArray(
+        chatRooms.name,
+        projectIds.map((id) => `project:${id}`),
+      ),
+    );
 }
 
 export async function getOrCreateDirectRoom(userId1: number, userId2: number) {
   const db = await getDb();
   if (!db) throw new Error("DB not available");
   // Find existing DM room between the two users
-  const rooms = await db.select({ roomId: chatRoomMembers.roomId })
-    .from(chatRoomMembers).where(eq(chatRoomMembers.userId, userId1));
-  const roomIds = rooms.map(r => r.roomId);
+  const rooms = await db
+    .select({ roomId: chatRoomMembers.roomId })
+    .from(chatRoomMembers)
+    .where(eq(chatRoomMembers.userId, userId1));
+  const roomIds = rooms.map((r) => r.roomId);
   if (roomIds.length > 0) {
-    const shared = await db.select({ roomId: chatRoomMembers.roomId })
+    const shared = await db
+      .select({ roomId: chatRoomMembers.roomId })
       .from(chatRoomMembers)
-      .where(and(eq(chatRoomMembers.userId, userId2), inArray(chatRoomMembers.roomId, roomIds)));
+      .where(
+        and(
+          eq(chatRoomMembers.userId, userId2),
+          inArray(chatRoomMembers.roomId, roomIds),
+        ),
+      );
     if (shared.length > 0) {
       // Verify it's a direct room
-      const room = await db.select().from(chatRooms)
-        .where(and(eq(chatRooms.id, shared[0].roomId), eq(chatRooms.type, "direct"))).limit(1);
+      const room = await db
+        .select()
+        .from(chatRooms)
+        .where(
+          and(eq(chatRooms.id, shared[0].roomId), eq(chatRooms.type, "direct")),
+        )
+        .limit(1);
       if (room[0]) return room[0];
     }
   }
   // Create new DM room
-  const [room] = await db.insert(chatRooms).values({ type: "direct" }).returning();
+  const [room] = await db
+    .insert(chatRooms)
+    .values({ type: "direct" })
+    .returning();
   if (!room) throw new Error("Failed to create direct chat room");
 
   await db.insert(chatRoomMembers).values([
@@ -357,11 +480,22 @@ export async function getOrCreateDirectRoom(userId1: number, userId2: number) {
   return room;
 }
 
-export async function isRoomMember(roomId: number, userId: number): Promise<boolean> {
+export async function isRoomMember(
+  roomId: number,
+  userId: number,
+): Promise<boolean> {
   const db = await getDb();
   if (!db) return false;
-  const result = await db.select({ id: chatRoomMembers.id }).from(chatRoomMembers)
-    .where(and(eq(chatRoomMembers.roomId, roomId), eq(chatRoomMembers.userId, userId))).limit(1);
+  const result = await db
+    .select({ id: chatRoomMembers.id })
+    .from(chatRoomMembers)
+    .where(
+      and(
+        eq(chatRoomMembers.roomId, roomId),
+        eq(chatRoomMembers.userId, userId),
+      ),
+    )
+    .limit(1);
   return result.length > 0;
 }
 
@@ -381,7 +515,10 @@ export async function getMessages(roomId: number, limit = 50) {
 export async function sendMessage(data: InsertMessage) {
   const db = await getDb();
   if (!db) throw new Error("DB not available");
-  const [inserted] = await db.insert(messages).values(data).returning({ id: messages.id });
+  const [inserted] = await db
+    .insert(messages)
+    .values(data)
+    .returning({ id: messages.id });
   if (!inserted) throw new Error("Failed to send message");
 
   const rows = await db
@@ -396,20 +533,25 @@ export async function sendMessage(data: InsertMessage) {
 export async function getDirectRoomsForUser(userId: number) {
   const db = await getDb();
   if (!db) return [];
-  const userRooms = await db.select({ roomId: chatRoomMembers.roomId })
-    .from(chatRoomMembers).where(eq(chatRoomMembers.userId, userId));
-  const roomIds = userRooms.map(r => r.roomId);
+  const userRooms = await db
+    .select({ roomId: chatRoomMembers.roomId })
+    .from(chatRoomMembers)
+    .where(eq(chatRoomMembers.userId, userId));
+  const roomIds = userRooms.map((r) => r.roomId);
   if (roomIds.length === 0) return [];
-  const directRooms = await db.select().from(chatRooms)
+  const directRooms = await db
+    .select()
+    .from(chatRooms)
     .where(and(inArray(chatRooms.id, roomIds), eq(chatRooms.type, "direct")));
   // For each room, get the other user
   const result = [];
   for (const room of directRooms) {
-    const members = await db.select({ user: users })
+    const members = await db
+      .select({ user: users })
       .from(chatRoomMembers)
       .innerJoin(users, eq(chatRoomMembers.userId, users.id))
       .where(and(eq(chatRoomMembers.roomId, room.id)));
-    const otherUser = members.find(m => m.user.id !== userId);
+    const otherUser = members.find((m) => m.user.id !== userId);
     if (otherUser) result.push({ room, otherUser: otherUser.user });
   }
   return result;
@@ -425,7 +567,9 @@ export async function createNotification(data: InsertNotification) {
 export async function getNotificationsForUser(userId: number, limit = 30) {
   const db = await getDb();
   if (!db) return [];
-  return db.select().from(notifications)
+  return db
+    .select()
+    .from(notifications)
     .where(eq(notifications.userId, userId))
     .orderBy(desc(notifications.createdAt))
     .limit(limit);
@@ -434,22 +578,30 @@ export async function getNotificationsForUser(userId: number, limit = 30) {
 export async function markNotificationRead(id: number, userId: number) {
   const db = await getDb();
   if (!db) return;
-  await db.update(notifications).set({ isRead: true })
+  await db
+    .update(notifications)
+    .set({ isRead: true })
     .where(and(eq(notifications.id, id), eq(notifications.userId, userId)));
 }
 
 export async function markAllNotificationsRead(userId: number) {
   const db = await getDb();
   if (!db) return;
-  await db.update(notifications).set({ isRead: true }).where(eq(notifications.userId, userId));
+  await db
+    .update(notifications)
+    .set({ isRead: true })
+    .where(eq(notifications.userId, userId));
 }
 
 export async function getUnreadNotificationCount(userId: number) {
   const db = await getDb();
   if (!db) return 0;
-  const result = await db.select({ count: sql<number>`count(*)` })
+  const result = await db
+    .select({ count: sql<number>`count(*)` })
     .from(notifications)
-    .where(and(eq(notifications.userId, userId), eq(notifications.isRead, false)));
+    .where(
+      and(eq(notifications.userId, userId), eq(notifications.isRead, false)),
+    );
   return Number(result[0]?.count ?? 0);
 }
 
@@ -464,12 +616,18 @@ export async function getRecentActivities(userId: number, limit = 20) {
   const db = await getDb();
   if (!db) return [];
   // Get activities from user's projects
-  const memberRows = await db.select({ projectId: projectMembers.projectId })
-    .from(projectMembers).where(eq(projectMembers.userId, userId));
-  const projectIds = memberRows.map(r => r.projectId);
-  const conditions = projectIds.length > 0
-    ? or(eq(activities.userId, userId), inArray(activities.relatedProjectId, projectIds))
-    : eq(activities.userId, userId);
+  const memberRows = await db
+    .select({ projectId: projectMembers.projectId })
+    .from(projectMembers)
+    .where(eq(projectMembers.userId, userId));
+  const projectIds = memberRows.map((r) => r.projectId);
+  const conditions =
+    projectIds.length > 0
+      ? or(
+          eq(activities.userId, userId),
+          inArray(activities.relatedProjectId, projectIds),
+        )
+      : eq(activities.userId, userId);
   const rows = await db
     .select({ activity: activities, actor: users })
     .from(activities)
@@ -483,18 +641,40 @@ export async function getRecentActivities(userId: number, limit = 20) {
 // â”€â”€â”€ Dashboard Stats â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export async function getDashboardStats(userId: number) {
   const db = await getDb();
-  if (!db) return { activeTasks: 0, completedTasks: 0, projectCount: 0, pendingApproval: 0 };
-  const memberRows = await db.select({ projectId: projectMembers.projectId })
-    .from(projectMembers).where(eq(projectMembers.userId, userId));
-  const projectIds = memberRows.map(r => r.projectId);
-  if (projectIds.length === 0) return { activeTasks: 0, completedTasks: 0, projectCount: 0, pendingApproval: 0 };
+  if (!db)
+    return {
+      activeTasks: 0,
+      completedTasks: 0,
+      projectCount: 0,
+      pendingApproval: 0,
+    };
+  const memberRows = await db
+    .select({ projectId: projectMembers.projectId })
+    .from(projectMembers)
+    .where(eq(projectMembers.userId, userId));
+  const projectIds = memberRows.map((r) => r.projectId);
+  if (projectIds.length === 0)
+    return {
+      activeTasks: 0,
+      completedTasks: 0,
+      projectCount: 0,
+      pendingApproval: 0,
+    };
 
-  const [activeResult] = await db.select({ count: sql<number>`count(*)` })
-    .from(tasks).where(and(inArray(tasks.projectId, projectIds), sql`status != 'done'`));
-  const [completedResult] = await db.select({ count: sql<number>`count(*)` })
-    .from(tasks).where(and(inArray(tasks.projectId, projectIds), eq(tasks.status, "done")));
-  const [approvalResult] = await db.select({ count: sql<number>`count(*)` })
-    .from(tasks).where(and(inArray(tasks.projectId, projectIds), eq(tasks.status, "approval")));
+  const [activeResult] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(tasks)
+    .where(and(inArray(tasks.projectId, projectIds), sql`status != 'done'`));
+  const [completedResult] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(tasks)
+    .where(and(inArray(tasks.projectId, projectIds), eq(tasks.status, "done")));
+  const [approvalResult] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(tasks)
+    .where(
+      and(inArray(tasks.projectId, projectIds), eq(tasks.status, "approval")),
+    );
 
   return {
     activeTasks: Number(activeResult?.count ?? 0),

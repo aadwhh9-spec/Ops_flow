@@ -9,6 +9,8 @@ function required(name: string, fallback?: string): string {
 }
 
 export const ENV = {
+  databaseUrl: required("DATABASE_URL"),
+
   // The openId (email, in this simple auth setup) that should automatically
   // get the "admin" role the first time it signs up. Set this in your .env
   // to your own email so you have an admin account from day one.
