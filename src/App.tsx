@@ -42,14 +42,9 @@ export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [isSignupMode, setIsSignupMode] = useState(false);
   const [selectedRole, setSelectedRole] = useState<"admin" | "staff">("admin");
-  const [currentUserName, setCurrentUserName] = useState<string>("");
   const [loginEmail, setLoginEmail] = useState("ahmed.h@opsflow.io");
-  const [loginPassword, setLoginPassword] = useState("");
   const [signupName, setSignupName] = useState("");
   const [signupEmail, setSignupEmail] = useState("");
-  const [signupPassword, setSignupPassword] = useState("");
-  const [authError, setAuthError] = useState("");
-  const [authLoading, setAuthLoading] = useState(false);
 
   // Navigation states
   const [adminView, setAdminView] = useState<string>("dash");
@@ -57,6 +52,7 @@ export default function App() {
   const [activeProjectKey, setActiveProjectKey] = useState<string>("ecommerce");
   const [activeTaskCategory, setActiveTaskCategory] = useState<"Completed" | "In Progress" | "Not Started">("Completed");
   const [staffFilter, setStaffFilter] = useState<"all" | "done" | "notdone">("all");
+  const [tasksFilterProject, setTasksFilterProject] = useState<string>("all");
 
   // Chat target state
   const [chatType, setChatType] = useState<"proj" | "dm">("proj");
@@ -108,52 +104,26 @@ export default function App() {
     }
     return key;
   };
-
+const getDaysRemaining = (endDate: string): { text: string; isOverdue: boolean } => {
+    const today = new Date();
+    const end = new Date(endDate);
+    const diffTime = end.getTime() - today.getTime();
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    if (diffDays < 0) {
+      return { text: `Overdue by ${Math.abs(diffDays)} days`, isOverdue: true };
+    }
+    return { text: `${diffDays} days remaining`, isOverdue: false };
+  };
   // Fetch full live backend database
   const fetchWorkspace = async () => {
     try {
-      const res = await fetch("/api/workspace", { credentials: "include" });
-      if (!res.ok) {
-        throw new Error(`Workspace request failed with status ${res.status}`);
-      }
-
-      const responseData = await res.json();
-
-      // Support both a direct REST response and a wrapped tRPC-style response.
-      const data =
-        responseData?.workspace ??
-        responseData?.result?.data?.json ??
-        responseData?.data ??
-        responseData;
-
-      const normalizedProjects: Project[] = Array.isArray(data?.projects)
-        ? data.projects.map((project: Project) => ({
-            ...project,
-            id: String(project.id),
-            team: Array.isArray(project.team) ? project.team : [],
-          }))
-        : [];
-
-      const normalizedTasks: Task[] = Array.isArray(data?.tasks)
-        ? data.tasks.map((task: Task) => ({
-            ...task,
-            id: String(task.id),
-            projectId: String(task.projectId),
-          }))
-        : [];
-
-      setProjects(normalizedProjects);
-      setTasks(normalizedTasks);
-      setMembers(Array.isArray(data?.members) ? data.members : []);
-      setChats(Array.isArray(data?.chats) ? data.chats : []);
-
-      // Select a real project instead of keeping the old hard-coded key.
-      if (normalizedProjects.length > 0) {
-        setActiveProjectKey((currentKey) =>
-          normalizedProjects.some((project) => project.id === String(currentKey))
-            ? String(currentKey)
-            : normalizedProjects[0].id
-        );
+      const res = await fetch("/api/workspace");
+      if (res.ok) {
+        const data = await res.json();
+        setProjects(data.projects);
+        setTasks(data.tasks);
+        setMembers(data.members);
+        setChats(data.chats);
       }
     } catch (err) {
       console.error("Failed to load workspace data:", err);
@@ -173,109 +143,36 @@ export default function App() {
   }, [chats, chatTarget]);
 
   // Actions
-  const handleLogin = async () => {
-    setAuthError("");
-
-    if (!loginEmail || !loginPassword) {
-      setAuthError("Please enter your email and password");
-      return;
-    }
-
-    setAuthLoading(true);
-    try {
-      const res = await fetch("/api/trpc/auth.login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          json: {
-            email: loginEmail,
-            password: loginPassword,
-          },
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data?.error?.json?.message || "Invalid email or password");
-      }
-
-      const role = data?.result?.data?.json?.user?.role;
-      const normalizedRole = String(role || "staff").toLowerCase();
-      const userName =
-        data?.result?.data?.json?.user?.name ||
-        loginEmail.split("@")[0].replace(".", " ");
-      setCurrentUserName(userName);
-
-      if (normalizedRole === "admin") {
-        setSelectedRole("admin");
-        setAdminView("dash");
-      } else {
-        setSelectedRole("staff");
-        setStaffView("dash");
-      }
-
-      await fetchWorkspace();
+  const handleLogin = () => {
+    if (selectedRole === "admin") {
       setIsLoggedIn(true);
-    } catch (error) {
-      setAuthError(error instanceof Error ? error.message : "Login failed");
-    } finally {
-      setAuthLoading(false);
+      setAdminView("dash");
+    } else {
+      setIsLoggedIn(true);
+      setStaffView("dash");
     }
   };
 
   const handleSignup = async () => {
-    setAuthError("");
-
-    if (!signupName || !signupEmail || !signupPassword) {
-      setAuthError("Please enter your name, email, and password");
-      return;
-    }
-
-    setAuthLoading(true);
+    if (!signupName || !signupEmail) return;
     try {
-      const response = await fetch("/api/trpc/auth.register", {
+      // Create team member on backend
+      await fetch("/api/members", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "include",
         body: JSON.stringify({
-          json: {
-            name: signupName,
-            email: signupEmail,
-            password: signupPassword,
-          },
+          name: signupName,
+          email: signupEmail,
+          role: "Administrator",
+          department: "Management",
         }),
       });
-
-      const text = await response.text();
-      if (!text) {
-        throw new Error("The server returned an empty response");
-      }
-
-      const data = JSON.parse(text);
-      if (!response.ok) {
-        throw new Error(
-          data?.error?.json?.message ||
-          data?.error?.message ||
-          "Registration failed"
-        );
-      }
-
-      const role = data?.result?.data?.json?.user?.role;
-      setCurrentUserName(data?.result?.data?.json?.user?.name || signupName);
-      if (String(role).toLowerCase() === "admin") {
-        setSelectedRole("admin");
-        setAdminView("dash");
-      } else {
-        setSelectedRole("staff");
-        setStaffView("dash");
-      }
       await fetchWorkspace();
       setIsLoggedIn(true);
-    } catch (error) {
-      setAuthError(error instanceof Error ? error.message : "Registration failed");
-    } finally {
-      setAuthLoading(false);
+      setSelectedRole("admin");
+      setAdminView("dash");
+    } catch (err) {
+      console.error(err);
     }
   };
 
@@ -285,7 +182,6 @@ export default function App() {
       const res = await fetch("/api/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "include",
         body: JSON.stringify({
           name: npName,
           description: npDesc,
@@ -314,7 +210,6 @@ export default function App() {
       const res = await fetch("/api/tasks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "include",
         body: JSON.stringify({
           projectId: activeProjectKey,
           name: ntName,
@@ -343,7 +238,6 @@ export default function App() {
       const res = await fetch(`/api/tasks/${taskId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        credentials: "include",
         body: JSON.stringify({ status: nextStatus }),
       });
       if (res.ok) {
@@ -362,7 +256,6 @@ export default function App() {
       const res = await fetch("/api/members", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "include",
         body: JSON.stringify({
           name: formattedName,
           email: inviteEmail,
@@ -384,12 +277,11 @@ export default function App() {
 
   const handleSendChatMessage = async () => {
     if (!newMessageText.trim()) return;
-    const senderName = effectiveUserName || (selectedRole === "admin" ? "Ahmed Hassan" : "Sara Ahmed");
+    const senderName = selectedRole === "admin" ? "Ahmed Hassan" : "Sara Ahmed";
     try {
       const res = await fetch("/api/chat/message", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "include",
         body: JSON.stringify({
           type: chatType,
           targetId: chatTarget,
@@ -460,27 +352,15 @@ export default function App() {
   const notStartedTasks = tasks.filter((t) => t.status === "Not Started").length;
 
   // Filter tasks based on category in admin tasks view
-  const filteredTasksForCategory = tasks.filter((t) => t.status === activeTaskCategory);
-
+const filteredTasksForCategory = tasks.filter((t) => t.status === activeTaskCategory && (tasksFilterProject === "all" || t.projectId === tasksFilterProject));
   // Active project detail object
-  const activeProject = projects.find((p) => String(p.id) === String(activeProjectKey)) || projects[0];
+  const activeProject = projects.find((p) => p.id === activeProjectKey) || projects[0];
 
   // Chats target messages list
   const currentChatMessages = chats.filter((c) => c.type === chatType && c.targetId === chatTarget);
 
   // Staff tasks computations
-  // Match by email against the members list first â€” this is the most reliable way
-  // to get the exact name string the backend uses in task.assignedTo / project.team,
-  // since the name returned from the login response may be formatted differently
-  // (e.g. parsed from the email) than how it's stored on tasks/projects.
-  const currentMember = members.find(
-    (m) => ((m as any).email || "").toLowerCase() === loginEmail.toLowerCase()
-  );
-  const effectiveUserName = currentMember?.name || currentUserName;
-  const staffProjectsList = projects.filter((p) =>
-    Array.isArray(p.team) && p.team.includes(effectiveUserName)
-  );
-  const staffTasksList = tasks.filter((t) => t.assignedTo === effectiveUserName);
+  const staffTasksList = tasks.filter((t) => t.assignedTo === "Sara Ahmed");
   const staffCompletedTasksCount = staffTasksList.filter((t) => t.status === "Completed").length;
   const staffTasksProgressPercent = staffTasksList.length > 0 ? Math.round((staffCompletedTasksCount / staffTasksList.length) * 100) : 0;
 
@@ -552,13 +432,20 @@ export default function App() {
                 <label className="block text-xs font-bold text-gray-600 uppercase mb-1 tracking-wider">{t("Password")}</label>
                 <input
                   type="password"
-                  value={loginPassword}
-                  onChange={(e) => setLoginPassword(e.target.value)}
-                  placeholder="Enter password"
+                  value="••••••••"
+                  readOnly
                   className="w-full px-4 py-2.5 bg-[#FAFBFD] border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all text-gray-800"
                 />
               </div>
-
+<div className="flex justify-end mb-3">
+                <button
+                  type="button"
+                  onClick={() => alert(t("Password reset link will be sent to your email (feature pending backend integration)"))}
+                  className="text-xs text-blue-600 hover:text-blue-800 hover:underline"
+                >
+                  {t("Forgot password?")}
+                </button>
+              </div>
               <div className="grid grid-cols-2 gap-3 mb-2">
                 <button
                   onClick={() => {
@@ -588,21 +475,16 @@ export default function App() {
                 </button>
               </div>
 
-              {authError && (
-                <p className="text-sm text-red-600 text-center">{authError}</p>
-              )}
-
               <button
                 onClick={handleLogin}
-                disabled={authLoading}
                 className="w-full py-3 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white rounded-xl text-sm font-semibold shadow-md transition-all flex items-center justify-center gap-2"
               >
-                <span>{authLoading ? "Logging in..." : t("Log In")}</span>
+                <span>{t("Log In")}</span>
               </button>
 
               <div className="text-center mt-4">
                 <button
-                  onClick={() => { setAuthError(""); setIsSignupMode(true); }}
+                  onClick={() => setIsSignupMode(true)}
                   className="text-xs text-gray-500 hover:text-gray-900"
                 >
                   Need an Admin account? <span className="font-bold text-blue-600 hover:underline">Register now</span>
@@ -637,28 +519,21 @@ export default function App() {
                 <label className="block text-xs font-bold text-gray-600 uppercase mb-1 tracking-wider">{t("Password")}</label>
                 <input
                   type="password"
-                  value={signupPassword}
-                  onChange={(e) => setSignupPassword(e.target.value)}
-                  placeholder="Minimum 8 characters"
+                  placeholder="••••••••"
                   className="w-full px-4 py-2.5 bg-[#FAFBFD] border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all text-gray-800"
                 />
               </div>
 
-              {authError && (
-                <p className="text-sm text-red-600 text-center">{authError}</p>
-              )}
-
               <button
                 onClick={handleSignup}
-                disabled={authLoading}
                 className="w-full py-3 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white rounded-xl text-sm font-semibold shadow-md transition-all flex items-center justify-center gap-2"
               >
-                <span>{authLoading ? "Creating account..." : t("Create Account")}</span>
+                <span>{t("Create Account")}</span>
               </button>
 
               <div className="text-center mt-4">
                 <button
-                  onClick={() => { setAuthError(""); setIsSignupMode(false); }}
+                  onClick={() => setIsSignupMode(false)}
                   className="text-xs text-gray-500 hover:text-gray-900"
                 >
                   Already have an account? <span className="font-bold text-blue-600 hover:underline">Log In</span>
@@ -674,7 +549,7 @@ export default function App() {
   // RENDER MAIN APPLICATION LAYOUT
   return (
     <div className={`min-h-screen bg-[#F3F5F9] flex text-gray-800 ${isRtl ? "font-sans" : "font-sans"}`} dir={directionClass}>
-
+      
       {/* SIDEBAR */}
       <aside className="w-[260px] bg-[#0E1526] text-white flex flex-col flex-shrink-0 relative overflow-y-auto">
         {/* Brand Banner */}
@@ -954,30 +829,6 @@ export default function App() {
               <span>{t("Dashboard")}</span>
             </button>
 
-            <button
-              onClick={() => setStaffView("projects")}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-bold tracking-wide transition-all ${
-                staffView === "projects" || staffView === "projectdetail"
-                  ? "bg-[#1A2338] text-white"
-                  : "text-gray-400 hover:text-white hover:bg-gray-800/35"
-              }`}
-            >
-              <Folder className="w-4.5 h-4.5" />
-              <span>My Projects</span>
-            </button>
-
-            <button
-              onClick={() => setStaffView("tasks")}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-bold tracking-wide transition-all ${
-                staffView === "tasks"
-                  ? "bg-[#1A2338] text-white"
-                  : "text-gray-400 hover:text-white hover:bg-gray-800/35"
-              }`}
-            >
-              <CheckSquare className="w-4.5 h-4.5" />
-              <span>My Tasks</span>
-            </button>
-
             <div>
               <button
                 onClick={() => {
@@ -1043,15 +894,10 @@ export default function App() {
         <div className="p-4 border-t border-gray-800/60 mt-auto">
           <div className="flex items-center gap-3 p-2 bg-[#1A2338] rounded-xl">
             <div className="w-9 h-9 rounded-full bg-gradient-to-tr from-purple-500 to-indigo-600 flex items-center justify-center font-bold text-xs">
-              {(effectiveUserName || (selectedRole === "admin" ? "Ahmed Hassan" : "Sara Ahmed"))
-                .split(" ")
-                .map((part) => part[0])
-                .join("")
-                .slice(0, 2)
-                .toUpperCase()}
+              {selectedRole === "admin" ? "AH" : "SA"}
             </div>
             <div className="min-w-0">
-              <h4 className="text-xs font-bold truncate">{effectiveUserName || (selectedRole === "admin" ? "Ahmed Hassan" : "Sara Ahmed")}</h4>
+              <h4 className="text-xs font-bold truncate">{selectedRole === "admin" ? "Ahmed Hassan" : "Sara Ahmed"}</h4>
               <p className="text-[10px] text-gray-400 font-semibold uppercase">{selectedRole === "admin" ? "Super Admin" : "Staff"}</p>
             </div>
           </div>
@@ -1063,14 +909,14 @@ export default function App() {
             className="w-full mt-3 flex items-center gap-2 px-3 py-2 text-xs font-bold text-gray-400 hover:text-white hover:bg-gray-800/30 rounded-lg transition-all"
           >
             <LogOut className="w-3.5 h-3.5" />
-            <span>{isRtl ? "ØªØ³Ø¬ÙŠÙ„ Ø§Ù„Ø®Ø±ÙˆØ¬" : "Log Out"}</span>
+            <span>{isRtl ? "تسجيل الخروج" : "Log Out"}</span>
           </button>
         </div>
       </aside>
 
       {/* MAIN CONTAINER */}
       <main className="flex-1 flex flex-col min-w-0 min-h-screen relative overflow-y-auto">
-
+        
         {/* TOPBAR */}
         <header className="h-16 bg-white border-b border-gray-100 px-8 flex items-center justify-between flex-shrink-0">
           {/* Breadcrumbs */}
@@ -1158,7 +1004,7 @@ export default function App() {
                           className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm hover:shadow-md cursor-pointer transition-all relative"
                         >
                           <span className="absolute top-4 right-4 text-xs font-bold text-purple-500 bg-purple-50 px-2 py-0.5 rounded-full">
-                            {totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0}% done
+                            {Math.round((completedTasks / totalTasks) * 100)}% done
                           </span>
                           <p className="text-xs font-bold text-gray-400 uppercase tracking-wider">Completed Tasks</p>
                           <h3 className="text-3xl font-extrabold text-gray-900 mt-2">{completedTasks}</h3>
@@ -1201,7 +1047,7 @@ export default function App() {
                                   fill="transparent"
                                   stroke="#22C55E"
                                   strokeWidth="3.5"
-                                  strokeDasharray={`${totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0} ${100 - (totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0)}`}
+                                  strokeDasharray={`${Math.round((completedTasks / totalTasks) * 100)} ${100 - Math.round((completedTasks / totalTasks) * 100)}`}
                                   strokeDashoffset="0"
                                 />
                                 {/* In Progress section (blue) */}
@@ -1212,8 +1058,8 @@ export default function App() {
                                   fill="transparent"
                                   stroke="#3B82F6"
                                   strokeWidth="3.5"
-                                  strokeDasharray={`${totalTasks > 0 ? Math.round((inProgressTasks / totalTasks) * 100) : 0} ${100 - (totalTasks > 0 ? Math.round((inProgressTasks / totalTasks) * 100) : 0)}`}
-                                  strokeDashoffset={`-${totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0}`}
+                                  strokeDasharray={`${Math.round((inProgressTasks / totalTasks) * 100)} ${100 - Math.round((inProgressTasks / totalTasks) * 100)}`}
+                                  strokeDashoffset={`-${Math.round((completedTasks / totalTasks) * 100)}`}
                                 />
                               </svg>
                               <div className="absolute inset-0 flex flex-col items-center justify-center">
@@ -1282,11 +1128,6 @@ export default function App() {
                           </div>
 
                           <div className="space-y-4">
-                            {projects.length === 0 && (
-                              <p className="text-xs text-gray-400 text-center py-10 bg-gray-50 rounded-xl border border-dashed border-gray-200">
-                                No projects yet.
-                              </p>
-                            )}
                             {projects.map((proj) => (
                               <div
                                 key={proj.id}
@@ -1379,13 +1220,6 @@ export default function App() {
                               </tr>
                             </thead>
                             <tbody>
-                              {projects.length === 0 && (
-                                <tr>
-                                  <td colSpan={6} className="p-10 text-center text-xs text-gray-400">
-                                    No projects yet.
-                                  </td>
-                                </tr>
-                              )}
                               {projects.map((proj) => (
                                 <tr
                                   key={proj.id}
@@ -1404,7 +1238,12 @@ export default function App() {
                                       {proj.status}
                                     </span>
                                   </td>
-                                  <td className="p-4 text-gray-500">{proj.startDate} â€“ {proj.endDate}</td>
+                                <td className="p-4 text-gray-500">
+  {proj.startDate} - {proj.endDate}
+  <div className={`text-[10px] font-semibold mt-1 ${getDaysRemaining(proj.endDate).isOverdue ? "text-red-500" : "text-gray-400"}`}>
+    {getDaysRemaining(proj.endDate).text}
+  </div>
+</td>
                                   <td className="p-4">
                                     <div className="flex items-center gap-2">
                                       <span className="font-bold">{proj.progress}%</span>
@@ -1464,18 +1303,13 @@ export default function App() {
                       </div>
 
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                        {projects.length === 0 && (
-                          <p className="md:col-span-2 lg:col-span-3 text-xs text-gray-400 text-center py-12 bg-white rounded-2xl border border-dashed border-gray-200">
-                            No projects yet.
-                          </p>
-                        )}
                         {projects.map((proj) => (
                           <div
                             key={proj.id}
                             className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm hover:shadow-md transition-all flex flex-col h-full"
                           >
                             <div className="flex justify-between items-start mb-3">
-                              <span className="w-4.5 h-4.5 rounded-lg flex items-center justify-center font-bold text-xs" style={{ backgroundColor: `${proj.color}20`, color: proj.color }}>P</span>
+                              <span className="w-4.5 h-4.5 rounded-lg flex items-center justify-center font-bold text-xs" style={{ backgroundColor: `${proj.color}20`, color: proj.color }}>📁</span>
                               <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider ${
                                 proj.status === "In Progress" ? "bg-blue-50 text-blue-600" : "bg-purple-50 text-purple-600"
                               }`}>
@@ -1496,7 +1330,7 @@ export default function App() {
                               </div>
 
                               <div className="flex items-center justify-between pt-2 border-t border-gray-50 text-xs">
-                                <span className="text-gray-400 font-semibold">{proj.startDate} - {proj.endDate}</span>
+                                <span className="text-gray-400 font-semibold">{proj.startDate} – {proj.endDate}</span>
                                 <button
                                   onClick={() => {
                                     setActiveProjectKey(proj.id);
@@ -1504,7 +1338,7 @@ export default function App() {
                                   }}
                                   className="text-blue-600 hover:underline font-bold"
                                 >
-                                  Inspect Details
+                                  Inspect Details ›
                                 </button>
                               </div>
                             </div>
@@ -1515,22 +1349,7 @@ export default function App() {
                   )}
 
                   {/* ADMIN VIEW: PROJECT DEEP DIVE DETAILED PAGE */}
-                  {adminView === "projectdetail" && !activeProject && (
-                    <div className="space-y-6">
-                      <button
-                        onClick={() => setAdminView("allproj")}
-                        className="flex items-center gap-2 text-xs font-extrabold text-gray-700 hover:text-gray-900 transition-all bg-white border border-gray-200 px-3.5 py-1.5 rounded-xl shadow-sm"
-                      >
-                        <ArrowLeft className="w-3.5 h-3.5" />
-                        <span>Back to Projects</span>
-                      </button>
-                      <p className="text-xs text-gray-400 text-center py-10 bg-white rounded-2xl border border-dashed border-gray-200">
-                        Select a project to view its tasks.
-                      </p>
-                    </div>
-                  )}
-
-                  {adminView === "projectdetail" && activeProject && (
+                  {adminView === "projectdetail" && (
                     <div className="space-y-6">
                       <button
                         onClick={() => setAdminView("allproj")}
@@ -1623,13 +1442,13 @@ export default function App() {
                             </div>
 
                             <div className="space-y-2">
-                              {tasks.filter((t) => String(t.projectId) === String(activeProject.id)).length === 0 ? (
+                              {tasks.filter((t) => t.projectId === activeProject.id).length === 0 ? (
                                 <p className="text-xs text-gray-400 text-center py-6 bg-gray-50 rounded-xl border border-dashed border-gray-200">
                                   No tasks allocated to this project yet. Click Create Task above.
                                 </p>
                               ) : (
                                 tasks
-                                  .filter((t) => String(t.projectId) === String(activeProject.id))
+                                  .filter((t) => t.projectId === activeProject.id)
                                   .map((task) => (
                                     <div
                                       key={task.id}
@@ -1718,7 +1537,7 @@ export default function App() {
                             <div>
                               <label className="block text-xs font-bold text-gray-600 uppercase mb-1 tracking-wider">{t("Start Date")}</label>
                               <input
-                                type="text"
+                                type="date"
                                 value={npStart}
                                 onChange={(e) => setNpStart(e.target.value)}
                                 placeholder="Jun 1"
@@ -1728,7 +1547,7 @@ export default function App() {
                             <div>
                               <label className="block text-xs font-bold text-gray-600 uppercase mb-1 tracking-wider">{t("End Date")}</label>
                               <input
-                                type="text"
+                                type="date"
                                 value={npEnd}
                                 onChange={(e) => setNpEnd(e.target.value)}
                                 placeholder="Aug 15"
@@ -1761,9 +1580,9 @@ export default function App() {
                               {t("Cancel")}
                             </button>
                             <button
-                              onClick={handleCreateProject}
-                              className="flex-grow py-2.5 bg-[#0E1526] hover:bg-gray-800 text-white font-bold text-xs rounded-xl shadow-sm transition-all text-center"
-                            >
+                              onClick={selectedRole === "staff" ? () => alert(t("You do not have permission to create projects.")) : handleCreateProject}
+          className={`flex-grow py-2.5 font-bold text-xs rounded-xl shadow-sm transition-colors ${selectedRole === "staff" ? "bg-gray-300 text-gray-500 cursor-not-allowed" : "bg-[#0E1526] hover:bg-gray-800 text-white"}`}
+        >
                               {t("Save Project")}
                             </button>
                           </div>
@@ -1816,13 +1635,8 @@ export default function App() {
                       <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
                         <h3 className="font-extrabold text-sm text-gray-900 mb-4">Complete Task Catalog ({totalTasks})</h3>
                         <div className="space-y-3">
-                          {tasks.length === 0 && (
-                            <p className="text-xs text-gray-400 text-center py-10 bg-gray-50 rounded-xl border border-dashed border-gray-200">
-                              No tasks yet.
-                            </p>
-                          )}
                           {tasks.map((task) => {
-                            const matchedProj = projects.find((p) => String(p.id) === String(task.projectId));
+                            const matchedProj = projects.find((p) => p.id === task.projectId);
                             return (
                               <div
                                 key={task.id}
@@ -1884,6 +1698,38 @@ export default function App() {
                           <h2 className="text-xl font-bold text-gray-900 capitalize">Tasks: {t(activeTaskCategory)}</h2>
                           <p className="text-xs text-gray-500">Dispatch and verify pipeline completions</p>
                         </div>
+                        <div className="flex gap-2 mb-4">
+                    <button
+                      onClick={() => setActiveTaskCategory("Completed")}
+                      className={`px-4 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                        activeTaskCategory === "Completed"
+                          ? "bg-blue-600 text-white"
+                          : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                      }`}
+                    >
+                      {t("Completed")}
+                    </button>
+                    <button
+                      onClick={() => setActiveTaskCategory("In Progress")}
+                      className={`px-4 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                        activeTaskCategory === "In Progress"
+                          ? "bg-blue-600 text-white"
+                          : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                      }`}
+                    >
+                      {t("In Progress")}
+                    </button>
+                    <button
+                      onClick={() => setActiveTaskCategory("Not Started")}
+                      className={`px-4 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                        activeTaskCategory === "Not Started"
+                          ? "bg-blue-600 text-white"
+                          : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                      }`}
+                    >
+                      {t("Not Started")}
+                    </button>
+                  </div>
                         <span className={`px-3 py-1 bg-gray-100 rounded-full text-xs font-bold text-gray-600`}>
                           {filteredTasksForCategory.length} tasks cataloged
                         </span>
@@ -1895,7 +1741,7 @@ export default function App() {
                             <p className="text-xs text-gray-400 text-center py-10">No tasks currently fit this category.</p>
                           ) : (
                             filteredTasksForCategory.map((task) => {
-                              const matchedProj = projects.find((p) => String(p.id) === String(task.projectId));
+                              const matchedProj = projects.find((p) => p.id === task.projectId);
                               return (
                                 <div
                                   key={task.id}
@@ -1973,7 +1819,7 @@ export default function App() {
                                   }`}
                                 >
                                   <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-base font-extrabold flex-shrink-0" style={{ backgroundColor: proj.color }}>
-                                    ðŸ’¬
+                                    💬
                                   </div>
                                   <div className="min-w-0 flex-1">
                                     <div className="flex justify-between items-baseline">
@@ -2022,7 +1868,7 @@ export default function App() {
                           <div className="p-4 border-b border-gray-100 flex items-center justify-between">
                             <div className="flex items-center gap-3">
                               <div className="w-9 h-9 rounded-xl bg-blue-100 text-blue-600 flex items-center justify-center font-bold">
-                                {chatType === "proj" ? "ðŸ’¬" : "SA"}
+                                {chatType === "proj" ? "💬" : "SA"}
                               </div>
                               <div>
                                 <h4 className="font-bold text-xs text-gray-900">
@@ -2036,7 +1882,7 @@ export default function App() {
                           {/* Chat Messages flow */}
                           <div className="flex-1 overflow-y-auto p-6 space-y-4">
                             {currentChatMessages.map((msg) => {
-                              const isMe = msg.sender.name === (effectiveUserName || "Ahmed Hassan");
+                              const isMe = msg.sender.name === "Ahmed Hassan";
                               return (
                                 <div
                                   key={msg.id}
@@ -2113,7 +1959,7 @@ export default function App() {
                             </div>
                             <div>
                               <h3 className="font-bold text-sm text-gray-900">Ahmed Hassan</h3>
-                              <p className="text-xs text-gray-400">ahmed.h@opsflow.io Â· Admin since Jan 2024</p>
+                              <p className="text-xs text-gray-400">ahmed.h@opsflow.io · Admin since Jan 2024</p>
                             </div>
                           </div>
 
@@ -2138,7 +1984,7 @@ export default function App() {
                             </div>
                             <div>
                               <h3 className="font-bold text-sm text-gray-900">Nadia Qasim</h3>
-                              <p className="text-xs text-gray-400">nadia.q@opsflow.io Â· Admin since Mar 2023</p>
+                              <p className="text-xs text-gray-400">nadia.q@opsflow.io · Admin since Mar 2023</p>
                             </div>
                           </div>
 
@@ -2193,7 +2039,7 @@ export default function App() {
                                   </div>
                                   <div>
                                     <h3 className="font-bold text-sm text-gray-900">{m.name}</h3>
-                                    <p className="text-[10px] text-gray-400 font-semibold">{m.role} Â· {m.department}</p>
+                                    <p className="text-[10px] text-gray-400 font-semibold">{m.role} · {m.department}</p>
                                   </div>
                                 </div>
 
@@ -2235,7 +2081,9 @@ export default function App() {
                       <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
                         <h3 className="font-extrabold text-sm text-gray-900 mb-4">{t("My Projects")}</h3>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          {staffProjectsList.map((p) => (
+                          {projects
+                            .filter((p) => p.team.includes("Sara Ahmed"))
+                            .map((p) => (
                               <div key={p.id} className="p-4 bg-gray-50 rounded-xl border border-gray-100 flex justify-between items-center text-xs">
                                 <div className="flex items-center gap-2">
                                   <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: p.color }}></span>
@@ -2321,7 +2169,7 @@ export default function App() {
                               </p>
                             ) : (
                               getFilteredStaffTasks().map((t) => {
-                                const matchedProj = projects.find((p) => String(p.id) === String(t.projectId));
+                                const matchedProj = projects.find((p) => p.id === t.projectId);
                                 return (
                                   <div
                                     key={t.id}
@@ -2343,7 +2191,7 @@ export default function App() {
                                           {t.name}
                                         </h4>
                                         <span className="text-[10px] text-gray-400 font-semibold uppercase tracking-wider block mt-0.5" style={{ color: matchedProj?.color }}>
-                                          {matchedProj?.name} Â· {t.date}
+                                          {matchedProj?.name} · {t.date}
                                         </span>
                                       </div>
                                     </div>
@@ -2358,184 +2206,6 @@ export default function App() {
                               })
                             )}
                           </div>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* STAFF VIEW: MY PROJECTS */}
-                  {staffView === "projects" && (
-                    <div className="space-y-6">
-                      <div>
-                        <h2 className="text-xl font-bold text-gray-900">My Projects</h2>
-                        <p className="text-xs text-gray-400 mt-1">Projects assigned to your account.</p>
-                      </div>
-
-                      {staffProjectsList.length === 0 ? (
-                        <div className="bg-white rounded-2xl border border-dashed border-gray-200 p-12 text-center">
-                          <Folder className="w-10 h-10 text-gray-300 mx-auto mb-3" />
-                          <h3 className="font-bold text-sm text-gray-700">No projects assigned yet</h3>
-                          <p className="text-xs text-gray-400 mt-1">An Admin must add you to a project before it appears here.</p>
-                        </div>
-                      ) : (
-                        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
-                          {staffProjectsList.map((project) => {
-                            const projectTasks = staffTasksList.filter(
-                              (task) => String(task.projectId) === String(project.id)
-                            );
-                            const completed = projectTasks.filter((task) => task.status === "Completed").length;
-                            return (
-                              <button
-                                key={project.id}
-                                onClick={() => {
-                                  setActiveProjectKey(String(project.id));
-                                  setStaffView("projectdetail");
-                                }}
-                                className="text-left bg-white rounded-2xl border border-gray-100 shadow-sm p-5 hover:shadow-md hover:border-blue-100 transition-all"
-                              >
-                                <div className="flex items-start justify-between gap-3">
-                                  <div className="flex items-center gap-3 min-w-0">
-                                    <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: project.color }} />
-                                    <div className="min-w-0">
-                                      <h3 className="font-extrabold text-sm text-gray-900 truncate">{project.name}</h3>
-                                      <p className="text-xs text-gray-400 mt-1 line-clamp-2">{project.description || "No description"}</p>
-                                    </div>
-                                  </div>
-                                  <ChevronRight className="w-4 h-4 text-gray-300 flex-shrink-0" />
-                                </div>
-                                <div className="mt-5 flex items-center justify-between text-xs">
-                                  <span className="text-gray-500">{completed}/{projectTasks.length} tasks completed</span>
-                                  <span className="font-bold text-blue-600">{project.progress || 0}%</span>
-                                </div>
-                                <div className="w-full h-1.5 bg-gray-100 rounded-full mt-2 overflow-hidden">
-                                  <div className="h-full rounded-full" style={{ width: `${project.progress || 0}%`, backgroundColor: project.color }} />
-                                </div>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* STAFF VIEW: READ-ONLY PROJECT DETAIL */}
-                  {staffView === "projectdetail" && (
-                    <div className="space-y-6">
-                      <button
-                        onClick={() => setStaffView("projects")}
-                        className="flex items-center gap-2 text-xs font-bold text-gray-500 hover:text-gray-900"
-                      >
-                        <ArrowLeft className="w-4 h-4" /> Back to My Projects
-                      </button>
-
-                      {!activeProject || !staffProjectsList.some((p) => String(p.id) === String(activeProject.id)) ? (
-                        <div className="bg-white rounded-2xl border border-dashed border-gray-200 p-12 text-center">
-                          <ShieldAlert className="w-10 h-10 text-gray-300 mx-auto mb-3" />
-                          <h3 className="font-bold text-sm text-gray-700">Project unavailable</h3>
-                          <p className="text-xs text-gray-400 mt-1">You can only open projects assigned to you.</p>
-                        </div>
-                      ) : (
-                        <>
-                          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
-                            <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
-                              <div>
-                                <div className="flex items-center gap-2">
-                                  <span className="w-3 h-3 rounded-full" style={{ backgroundColor: activeProject.color }} />
-                                  <h2 className="text-xl font-extrabold text-gray-900">{activeProject.name}</h2>
-                                </div>
-                                <p className="text-sm text-gray-500 mt-3 max-w-3xl">{activeProject.description || "No description"}</p>
-                              </div>
-                              <span className="px-3 py-1 rounded-full text-[10px] font-bold uppercase bg-blue-50 text-blue-600">
-                                {activeProject.status}
-                              </span>
-                            </div>
-                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-6 text-xs">
-                              <div className="bg-gray-50 rounded-xl p-4"><span className="text-gray-400 block">Start date</span><b className="text-gray-800 mt-1 block">{activeProject.startDate}</b></div>
-                              <div className="bg-gray-50 rounded-xl p-4"><span className="text-gray-400 block">End date</span><b className="text-gray-800 mt-1 block">{activeProject.endDate}</b></div>
-                              <div className="bg-gray-50 rounded-xl p-4"><span className="text-gray-400 block">Progress</span><b className="text-gray-800 mt-1 block">{activeProject.progress || 0}%</b></div>
-                            </div>
-                          </div>
-
-                          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
-                            <h3 className="font-extrabold text-sm text-gray-900 mb-4">My Tasks in This Project</h3>
-                            <div className="space-y-2">
-                              {staffTasksList.filter((task) => String(task.projectId) === String(activeProject.id)).length === 0 ? (
-                                <p className="text-xs text-gray-400 text-center py-8 bg-gray-50 rounded-xl border border-dashed border-gray-200">
-                                  No tasks assigned to you in this project yet.
-                                </p>
-                              ) : (
-                                staffTasksList
-                                  .filter((task) => String(task.projectId) === String(activeProject.id))
-                                  .map((task) => (
-                                    <div key={task.id} className="flex items-center justify-between gap-3 p-4 bg-gray-50 rounded-xl border border-gray-100">
-                                      <div className="flex items-center gap-3 min-w-0">
-                                        <button
-                                          onClick={() => handleToggleTaskStatus(task.id, task.status)}
-                                          className={`w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 ${
-                                            task.status === "Completed" ? "bg-green-500 border-green-500 text-white" : "border-gray-300"
-                                          }`}
-                                        >
-                                          {task.status === "Completed" && <CheckCircle2 className="w-3.5 h-3.5" />}
-                                        </button>
-                                        <div className="min-w-0">
-                                          <h4 className="text-xs font-bold text-gray-900 truncate">{task.name}</h4>
-                                          <p className="text-[10px] text-gray-400 mt-1">{task.status} · {task.date}</p>
-                                        </div>
-                                      </div>
-                                      <span className="px-2 py-1 rounded-full text-[9px] font-bold bg-orange-50 text-orange-600">{task.priority}</span>
-                                    </div>
-                                  ))
-                              )}
-                            </div>
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  )}
-
-                  {/* STAFF VIEW: MY TASKS */}
-                  {staffView === "tasks" && (
-                    <div className="space-y-6">
-                      <div>
-                        <h2 className="text-xl font-bold text-gray-900">My Tasks</h2>
-                        <p className="text-xs text-gray-400 mt-1">Only tasks assigned to your account are shown.</p>
-                      </div>
-
-                      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
-                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5">
-                          <h3 className="font-extrabold text-sm text-gray-900">Task List ({staffTasksList.length})</h3>
-                          <div className="flex gap-1.5 bg-gray-100 p-1 rounded-xl text-xs">
-                            <button onClick={() => setStaffFilter("all")} className={`px-3 py-1 rounded-lg font-semibold ${staffFilter === "all" ? "bg-white shadow-sm" : "text-gray-500"}`}>All</button>
-                            <button onClick={() => setStaffFilter("done")} className={`px-3 py-1 rounded-lg font-semibold ${staffFilter === "done" ? "bg-white shadow-sm" : "text-gray-500"}`}>Done</button>
-                            <button onClick={() => setStaffFilter("notdone")} className={`px-3 py-1 rounded-lg font-semibold ${staffFilter === "notdone" ? "bg-white shadow-sm" : "text-gray-500"}`}>Remaining</button>
-                          </div>
-                        </div>
-
-                        <div className="space-y-3">
-                          {getFilteredStaffTasks().length === 0 ? (
-                            <p className="text-xs text-gray-400 text-center py-10 bg-gray-50 rounded-xl border border-dashed border-gray-200">No tasks assigned yet.</p>
-                          ) : (
-                            getFilteredStaffTasks().map((task) => {
-                              const project = projects.find((p) => String(p.id) === String(task.projectId));
-                              return (
-                                <div key={task.id} className="flex items-center justify-between gap-3 p-4 bg-gray-50 rounded-xl border border-gray-100">
-                                  <div className="flex items-center gap-3 min-w-0">
-                                    <button
-                                      onClick={() => handleToggleTaskStatus(task.id, task.status)}
-                                      className={`w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 ${task.status === "Completed" ? "bg-green-500 border-green-500 text-white" : "border-gray-300"}`}
-                                    >
-                                      {task.status === "Completed" && <CheckCircle2 className="w-3.5 h-3.5" />}
-                                    </button>
-                                    <div className="min-w-0">
-                                      <h4 className={`text-xs font-bold truncate ${task.status === "Completed" ? "line-through text-gray-400" : "text-gray-900"}`}>{task.name}</h4>
-                                      <p className="text-[10px] text-gray-400 mt-1">{project?.name || "Unknown project"} · {task.status} · {task.date}</p>
-                                    </div>
-                                  </div>
-                                  <span className="px-2 py-1 rounded-full text-[9px] font-bold bg-orange-50 text-orange-600">{task.priority}</span>
-                                </div>
-                              );
-                            })
-                          )}
                         </div>
                       </div>
                     </div>
@@ -2557,7 +2227,7 @@ export default function App() {
 
                           <div className="flex-1 overflow-y-auto p-3 space-y-1">
                             {staffView === "chatprojects" ? (
-                              staffProjectsList.map((proj) => (
+                              projects.map((proj) => (
                                 <div
                                   key={proj.id}
                                   onClick={() => {
@@ -2569,7 +2239,7 @@ export default function App() {
                                   }`}
                                 >
                                   <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-base font-extrabold flex-shrink-0" style={{ backgroundColor: proj.color }}>
-                                    ðŸ’¬
+                                    💬
                                   </div>
                                   <div className="min-w-0 flex-1">
                                     <div className="flex justify-between items-baseline">
@@ -2583,7 +2253,7 @@ export default function App() {
                             ) : (
                               // Contact direct conversations list for staff
                               members.map((m) => {
-                                if (m.name === (effectiveUserName || "Sara Ahmed")) return null;
+                                if (m.name === "Sara Ahmed") return null;
                                 return (
                                   <div
                                     key={m.id}
@@ -2621,7 +2291,7 @@ export default function App() {
                           {/* Messages Flow */}
                           <div className="flex-1 overflow-y-auto p-6 space-y-4">
                             {currentChatMessages.map((msg) => {
-                              const isMe = msg.sender.name === (effectiveUserName || "Sara Ahmed");
+                              const isMe = msg.sender.name === "Sara Ahmed";
                               return (
                                 <div
                                   key={msg.id}
@@ -2688,7 +2358,7 @@ export default function App() {
                               </div>
                               <div>
                                 <h3 className="font-bold text-gray-900">{m.name}</h3>
-                                <p className="text-[10px] text-gray-400 font-semibold">{m.role} Â· {m.department}</p>
+                                <p className="text-[10px] text-gray-400 font-semibold">{m.role} · {m.department}</p>
                               </div>
                             </div>
                             <div className="flex justify-between items-center text-[10px] text-gray-400 font-semibold">
@@ -2873,9 +2543,12 @@ export default function App() {
                   onChange={(e) => setNtAssignee(e.target.value)}
                   className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-800"
                 >
-                  {members.map((m) => (
-                    <option key={m.id} value={m.name}>{m.name}</option>
-                  ))}
+                 {members
+  .filter((m) => activeProject.team.includes(m.name))
+  .map((m) => (
+    <option key={m.id} value={m.name}>{m.name}</option>
+  ))} 
+                   
                 </select>
               </div>
 

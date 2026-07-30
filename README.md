@@ -1,20 +1,27 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
-
-# Run and deploy your AI Studio app
-
-This contains everything you need to run your app locally.
-
-View your app in AI Studio: https://ai.studio/apps/c0dcc50f-9423-4672-ae64-07ad2efb5260
+# OpsFlow
 
 ## Run Locally
 
-**Prerequisites:**  Node.js
+Prerequisites: Node.js and PostgreSQL.
 
+1. Install the frontend and backend dependencies with `npm install` and
+   `npm --prefix backend install`.
+2. Copy the required environment values into `.env` (`DATABASE_URL`,
+   `JWT_SECRET`, and optionally `GEMINI_API_KEY`).
+3. Apply the database migration with `npm --prefix backend run db:migrate`.
+4. Start the backend with `npm --prefix backend run dev`.
+5. In another terminal, start the frontend with `npm run dev`.
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+The frontend runs on Vite and proxies API requests to the backend on port 4000.
+
+## Production
+
+Build both applications:
+
+```sh
+npm run build
+npm --prefix backend run build
+npm --prefix backend start
+```
+
+In production the backend serves the frontend build from `dist/`.

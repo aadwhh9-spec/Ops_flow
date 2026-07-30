@@ -9,10 +9,16 @@ import {
   getAllTasksForUser,
   getAllUsers,
   getProjectMembers,
+  getProjectRooms,
   getProjectsForUser,
   getTaskById,
+  getMessages,
+  getOrCreateDirectRoom,
+  getOrCreateProjectRoom,
+  getDirectRoomsForUser,
   getUserByEmail,
   isProjectMember,
+  sendMessage,
   updateTask,
   upsertUser,
 } from "./db";
@@ -41,6 +47,25 @@ function dbTaskStatus(status: string) {
   if (status === "Completed") return "done" as const;
   if (status === "In Progress") return "processing" as const;
   return "pending" as const;
+}
+
+function uiMessage(row: Awaited<ReturnType<typeof getMessages>>[number], type: "proj" | "dm", targetId: string) {
+  const name = row.sender.name ?? row.sender.email ?? "Member";
+  return {
+    id: String(row.message.id),
+    type,
+    targetId,
+    sender: {
+      name,
+      initials: name.split(/\s+/).map(part => part[0]).join("").slice(0, 2).toUpperCase(),
+      color: "#3B82F6",
+    },
+    text: row.message.content,
+    timestamp: row.message.createdAt.toLocaleTimeString("en-US", {
+      hour: "numeric",
+      minute: "2-digit",
+    }),
+  };
 }
 
 compatibilityRouter.get("/workspace", async (req, res, next) => {
@@ -96,7 +121,20 @@ compatibilityRouter.get("/workspace", async (req, res, next) => {
       since: member.createdAt.toLocaleString("en-US", { month: "short", year: "numeric" }),
     }));
 
-    return res.json({ projects, tasks, members, chats: [] });
+    const projectIds = dbProjects.map(project => project.id);
+    const [projectRooms, directRooms] = await Promise.all([
+      getProjectRooms(projectIds),
+      getDirectRoomsForUser(user.id),
+    ]);
+    const projectChats = (await Promise.all(projectRooms.map(async room => {
+      const projectId = room.name?.split(":")[1] ?? "";
+      return (await getMessages(room.id)).map(row => uiMessage(row, "proj", projectId));
+    }))).flat();
+    const directChats = (await Promise.all(directRooms.map(async ({ room, otherUser }) =>
+      (await getMessages(room.id)).map(row => uiMessage(row, "dm", String(otherUser.id)))
+    ))).flat();
+
+    return res.json({ projects, tasks, members, chats: [...projectChats, ...directChats] });
   } catch (error) {
     next(error);
   }
@@ -173,6 +211,91 @@ compatibilityRouter.post("/members", async (req, res, next) => {
     if (!member) throw new Error("Failed to create member");
     if (req.body.projectId) await addProjectMember(Number(req.body.projectId), member.id);
     return res.status(201).json({ success: true, member });
+  } catch (error) {
+    next(error);
+  }
+});
+
+compatibilityRouter.post("/projects/:id/team", async (req, res, next) => {
+  try {
+    const user = await authenticatedUser(req, res);
+    if (!user) return res.status(401).json({ error: "You must be logged in" });
+    const projectId = Number(req.params.id);
+    if (!projectId || !req.body.name) return res.status(400).json({ error: "Project and member name are required" });
+    if (user.role !== "admin" && !(await isProjectMember(projectId, user.id))) {
+      return res.status(403).json({ error: "Not a project member" });
+    }
+    const member = (await getAllUsers()).find(candidate => candidate.name === req.body.name);
+    if (!member) return res.status(404).json({ error: "Member not found" });
+    await addProjectMember(projectId, member.id);
+    return res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+compatibilityRouter.post("/chat/message", async (req, res, next) => {
+  try {
+    const user = await authenticatedUser(req, res);
+    if (!user) return res.status(401).json({ error: "You must be logged in" });
+    const text = String(req.body.text ?? "").trim();
+    const targetId = Number(req.body.targetId);
+    if (!text || !targetId) return res.status(400).json({ error: "Target and text are required" });
+
+    let room;
+    if (req.body.type === "dm") {
+      room = await getOrCreateDirectRoom(user.id, targetId);
+    } else {
+      if (user.role !== "admin" && !(await isProjectMember(targetId, user.id))) {
+        return res.status(403).json({ error: "Not a project member" });
+      }
+      room = await getOrCreateProjectRoom(targetId);
+    }
+    const message = await sendMessage({ roomId: room.id, senderId: user.id, content: text });
+    return res.status(201).json({ success: true, message });
+  } catch (error) {
+    next(error);
+  }
+});
+
+compatibilityRouter.post("/ai/ask", async (req, res, next) => {
+  try {
+    const user = await authenticatedUser(req, res);
+    if (!user) return res.status(401).json({ error: "You must be logged in" });
+    const question = String(req.body.question ?? "").trim();
+    if (!question) return res.status(400).json({ error: "Question is required" });
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return res.status(503).json({ error: "GEMINI_API_KEY is not configured" });
+
+    const [projects, tasks, users] = await Promise.all([
+      user.role === "admin" ? getAllProjects() : getProjectsForUser(user.id),
+      user.role === "admin" ? getAllTasks() : getAllTasksForUser(user.id),
+      getAllUsers(),
+    ]);
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [{ text: `You are OpsFlow Assistant. Reply in the user's language. Be concise and use this live workspace data:\n${JSON.stringify({ projects, tasks, users })}` }],
+          },
+          contents: [{ role: "user", parts: [{ text: question }] }],
+        }),
+      },
+    );
+    if (!response.ok) {
+      const detail = await response.text();
+      console.error("Gemini API error:", response.status, detail);
+      return res.status(502).json({ error: "Failed to communicate with Gemini" });
+    }
+    const payload = await response.json() as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    };
+    const answer = payload.candidates?.[0]?.content?.parts?.map(part => part.text ?? "").join("").trim();
+    if (!answer) return res.status(502).json({ error: "Gemini returned an empty response" });
+    return res.json({ answer });
   } catch (error) {
     next(error);
   }
