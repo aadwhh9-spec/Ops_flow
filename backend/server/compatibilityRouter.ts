@@ -8,6 +8,8 @@ import {
   addProjectMember,
   createProject,
   createTask,
+  deleteProject,
+  deleteTask,
   getAllProjects,
   getAllTasks,
   getAllTasksForUser,
@@ -24,6 +26,7 @@ import {
   getUserByEmail,
   isProjectMember,
   sendMessage,
+  updateProject,
   updateTask,
   upsertUser,
 } from "./db";
@@ -231,8 +234,10 @@ compatibilityRouter.get("/workspace", async (req, res, next) => {
         name: project.name,
         description: project.description ?? "",
         status: projectStatus(projectTasks),
-        startDate: project.createdAt.toISOString().slice(0, 10),
-        endDate: "TBD",
+        startDate: (project.startDate ?? project.createdAt)
+          .toISOString()
+          .slice(0, 10),
+        endDate: project.endDate?.toISOString().slice(0, 10) ?? "",
         progress: projectTasks.length
           ? Math.round((completed / projectTasks.length) * 100)
           : 0,
@@ -316,13 +321,92 @@ compatibilityRouter.post("/projects", async (req, res, next) => {
     }
     if (!req.body.name)
       return res.status(400).json({ error: "Project name is required" });
+    const startDate = req.body.startDate
+      ? new Date(String(req.body.startDate))
+      : undefined;
+    const endDate = req.body.endDate
+      ? new Date(String(req.body.endDate))
+      : undefined;
+    if (
+      (startDate && Number.isNaN(startDate.getTime())) ||
+      (endDate && Number.isNaN(endDate.getTime()))
+    ) {
+      return res.status(400).json({ error: "Invalid project date" });
+    }
+    if (startDate && endDate && endDate < startDate) {
+      return res
+        .status(400)
+        .json({ error: "End date must be on or after start date" });
+    }
     const project = await createProject({
       name: req.body.name,
       description: req.body.description,
       color: req.body.color,
       ownerId: user.id,
+      startDate,
+      endDate,
     });
     return res.status(201).json({ success: true, project });
+  } catch (error) {
+    next(error);
+  }
+});
+
+compatibilityRouter.patch("/projects/:id", async (req, res, next) => {
+  try {
+    const user = await authenticatedUser(req, res);
+    if (!user) return res.status(401).json({ error: "You must be logged in" });
+    if (user.role !== "admin") {
+      return res.status(403).json({ error: "Administrator access required" });
+    }
+    const projectId = Number(req.params.id);
+    const project = await getProjectById(projectId);
+    if (!project) return res.status(404).json({ error: "Project not found" });
+
+    const startDate = req.body.startDate
+      ? new Date(String(req.body.startDate))
+      : null;
+    const endDate = req.body.endDate
+      ? new Date(String(req.body.endDate))
+      : null;
+    if (
+      (startDate && Number.isNaN(startDate.getTime())) ||
+      (endDate && Number.isNaN(endDate.getTime()))
+    ) {
+      return res.status(400).json({ error: "Invalid project date" });
+    }
+    if (startDate && endDate && endDate < startDate) {
+      return res
+        .status(400)
+        .json({ error: "End date must be on or after start date" });
+    }
+
+    await updateProject(projectId, {
+      name: String(req.body.name ?? project.name).trim(),
+      description: String(req.body.description ?? ""),
+      color: String(req.body.color ?? project.color),
+      startDate,
+      endDate,
+    });
+    return res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+compatibilityRouter.delete("/projects/:id", async (req, res, next) => {
+  try {
+    const user = await authenticatedUser(req, res);
+    if (!user) return res.status(401).json({ error: "You must be logged in" });
+    if (user.role !== "admin") {
+      return res.status(403).json({ error: "Administrator access required" });
+    }
+    const projectId = Number(req.params.id);
+    if (!(await getProjectById(projectId))) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+    await deleteProject(projectId);
+    return res.json({ success: true });
   } catch (error) {
     next(error);
   }
@@ -374,7 +458,46 @@ compatibilityRouter.patch("/tasks/:id", async (req, res, next) => {
     ) {
       return res.status(403).json({ error: "Not a project member" });
     }
-    await updateTask(task.id, { status: dbTaskStatus(req.body.status) });
+    const isStatusOnly =
+      Object.keys(req.body).every((key) => key === "status") && req.body.status;
+    if (user.role !== "admin" && !isStatusOnly) {
+      return res.status(403).json({ error: "Administrator access required" });
+    }
+    const update: Parameters<typeof updateTask>[1] = {};
+    if (req.body.status) update.status = dbTaskStatus(req.body.status);
+    if (user.role === "admin") {
+      if (req.body.name !== undefined) update.title = String(req.body.name);
+      if (req.body.priority !== undefined) {
+        const priority = String(req.body.priority).toLowerCase();
+        update.priority =
+          priority === "high" ? "high" : priority === "low" ? "low" : "medium";
+      }
+      if (req.body.assignedTo !== undefined) {
+        const assignee = (await getAllUsers()).find(
+          (candidate) => candidate.name === req.body.assignedTo,
+        );
+        update.assigneeId = assignee?.id ?? null;
+      }
+    }
+    await updateTask(task.id, update);
+    return res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+compatibilityRouter.delete("/tasks/:id", async (req, res, next) => {
+  try {
+    const user = await authenticatedUser(req, res);
+    if (!user) return res.status(401).json({ error: "You must be logged in" });
+    if (user.role !== "admin") {
+      return res.status(403).json({ error: "Administrator access required" });
+    }
+    const taskId = Number(req.params.id);
+    if (!(await getTaskById(taskId))) {
+      return res.status(404).json({ error: "Task not found" });
+    }
+    await deleteTask(taskId);
     return res.json({ success: true });
   } catch (error) {
     next(error);

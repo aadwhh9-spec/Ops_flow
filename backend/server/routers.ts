@@ -178,11 +178,24 @@ export const appRouter = router({
       }),
     create: adminProcedure
       .input(
-        z.object({
-          name: z.string().min(1).max(255),
-          description: z.string().optional(),
-          color: z.string().optional(),
-        }),
+        z
+          .object({
+            name: z.string().min(1).max(255),
+            description: z.string().optional(),
+            color: z.string().optional(),
+            startDate: z.coerce.date().optional(),
+            endDate: z.coerce.date().optional(),
+          })
+          .refine(
+            (project) =>
+              !project.startDate ||
+              !project.endDate ||
+              project.endDate >= project.startDate,
+            {
+              message: "End date must be on or after start date",
+              path: ["endDate"],
+            },
+          ),
       )
       .mutation(async ({ ctx, input }) => {
         const project = await createProject({
@@ -190,6 +203,8 @@ export const appRouter = router({
           description: input.description,
           color: input.color ?? "#6366f1",
           ownerId: ctx.user.id,
+          startDate: input.startDate,
+          endDate: input.endDate,
         });
         await createActivity({
           userId: ctx.user.id,
@@ -206,6 +221,8 @@ export const appRouter = router({
           name: z.string().min(1).max(255).optional(),
           description: z.string().optional(),
           color: z.string().optional(),
+          startDate: z.coerce.date().nullable().optional(),
+          endDate: z.coerce.date().nullable().optional(),
         }),
       )
       .mutation(async ({ ctx, input }) => {

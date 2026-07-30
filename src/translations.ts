@@ -110,6 +110,13 @@ export const EN_TO_AR: Record<string, string> = {
   "All Projects": "كل المشاريع",
   "My Conversations": "محادثاتي",
   "Workspace Colleagues": "زملاء مساحة العمل",
+  "Edit Project": "تعديل المشروع",
+  "Edit Task": "تعديل المهمة",
+  "Save Changes": "حفظ التغييرات",
+  Edit: "تعديل",
+  Delete: "حذف",
+  Manage: "إدارة",
+  Unassigned: "غير مسندة",
 };
 
 export const AR_TO_EN: Record<string, string> = Object.fromEntries(

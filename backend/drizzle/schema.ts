@@ -55,7 +55,9 @@ export const users = pgTable("users", {
   role: userRoleEnum("role").default("user").notNull(),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
-  lastSignedIn: timestamp("lastSignedIn", { withTimezone: true }).defaultNow().notNull(),
+  lastSignedIn: timestamp("lastSignedIn", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
 });
 
 export type User = typeof users.$inferSelect;
@@ -68,6 +70,8 @@ export const projects = pgTable("projects", {
   description: text("description"),
   color: varchar("color", { length: 32 }).notNull().default("#6366f1"),
   ownerId: integer("ownerId").notNull(),
+  startDate: timestamp("startDate", { withTimezone: true }),
+  endDate: timestamp("endDate", { withTimezone: true }),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });
@@ -83,7 +87,9 @@ export const projectMembers = pgTable(
     projectId: integer("projectId").notNull(),
     userId: integer("userId").notNull(),
     role: projectMemberRoleEnum("role").notNull().default("member"),
-    joinedAt: timestamp("joinedAt", { withTimezone: true }).defaultNow().notNull(),
+    joinedAt: timestamp("joinedAt", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
   },
   (table) => [
     uniqueIndex("project_members_project_user_unique").on(
@@ -132,7 +138,9 @@ export const chatRoomMembers = pgTable("chat_room_members", {
   id: serial("id").primaryKey(),
   roomId: integer("roomId").notNull(),
   userId: integer("userId").notNull(),
-  joinedAt: timestamp("joinedAt", { withTimezone: true }).defaultNow().notNull(),
+  joinedAt: timestamp("joinedAt", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
 });
 
 export type ChatRoomMember = typeof chatRoomMembers.$inferSelect;

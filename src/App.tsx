@@ -28,6 +28,8 @@ import {
   TrendingUp,
   AlertCircle,
   Briefcase,
+  Pencil,
+  Trash2,
 } from "lucide-react";
 
 export default function App() {
@@ -92,6 +94,8 @@ export default function App() {
   const [ntPriority, setNtPriority] = useState<"High" | "Medium" | "Low">(
     "Medium",
   );
+  const [editingProject, setEditingProject] = useState<Project | null>(null);
+  const [editingTask, setEditingTask] = useState<Task | null>(null);
 
   // AI Assistant Floating panel states
   const [isAiOpen, setIsAiOpen] = useState(false);
@@ -320,6 +324,75 @@ export default function App() {
     } catch (err) {
       console.error(err);
       setAppError("Task update failed. Please try again.");
+    }
+  };
+
+  const handleUpdateProject = async () => {
+    if (!editingProject?.name.trim()) return;
+    try {
+      const res = await fetch(`/api/projects/${editingProject.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(editingProject),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Project update failed");
+      setEditingProject(null);
+      await fetchWorkspace();
+    } catch (err) {
+      setAppError(err instanceof Error ? err.message : "Project update failed");
+    }
+  };
+
+  const handleDeleteProject = async (project: Project) => {
+    if (
+      !window.confirm(
+        `Delete "${project.name}" and all of its tasks? This cannot be undone.`,
+      )
+    )
+      return;
+    try {
+      const res = await fetch(`/api/projects/${project.id}`, {
+        method: "DELETE",
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Project deletion failed");
+      await fetchWorkspace();
+      setAdminView("allproj");
+    } catch (err) {
+      setAppError(
+        err instanceof Error ? err.message : "Project deletion failed",
+      );
+    }
+  };
+
+  const handleUpdateTask = async () => {
+    if (!editingTask?.name.trim()) return;
+    try {
+      const res = await fetch(`/api/tasks/${editingTask.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(editingTask),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Task update failed");
+      setEditingTask(null);
+      await fetchWorkspace();
+    } catch (err) {
+      setAppError(err instanceof Error ? err.message : "Task update failed");
+    }
+  };
+
+  const handleDeleteTask = async (task: Task) => {
+    if (!window.confirm(`Delete task "${task.name}"? This cannot be undone.`))
+      return;
+    try {
+      const res = await fetch(`/api/tasks/${task.id}`, { method: "DELETE" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Task deletion failed");
+      await fetchWorkspace();
+    } catch (err) {
+      setAppError(err instanceof Error ? err.message : "Task deletion failed");
     }
   };
 
@@ -1661,15 +1734,35 @@ export default function App() {
                                     </div>
                                   </td>
                                   <td className="p-4 text-center">
-                                    <button
-                                      onClick={() => {
-                                        setActiveProjectKey(proj.id);
-                                        setAdminView("projectdetail");
-                                      }}
-                                      className="px-3 py-1 bg-gray-50 hover:bg-gray-100 text-gray-700 rounded-lg font-bold text-[10px] transition-all"
-                                    >
-                                      Manage
-                                    </button>
+                                    <div className="flex items-center justify-center gap-1">
+                                      <button
+                                        onClick={() => {
+                                          setActiveProjectKey(proj.id);
+                                          setAdminView("projectdetail");
+                                        }}
+                                        className="px-3 py-1 bg-gray-50 hover:bg-gray-100 text-gray-700 rounded-lg font-bold text-[10px] transition-all"
+                                      >
+                                        {t("Manage")}
+                                      </button>
+                                      <button
+                                        aria-label={`Edit ${proj.name}`}
+                                        onClick={() =>
+                                          setEditingProject({ ...proj })
+                                        }
+                                        className="rounded-lg p-1.5 text-blue-600 hover:bg-blue-50"
+                                      >
+                                        <Pencil className="h-3.5 w-3.5" />
+                                      </button>
+                                      <button
+                                        aria-label={`Delete ${proj.name}`}
+                                        onClick={() =>
+                                          handleDeleteProject(proj)
+                                        }
+                                        className="rounded-lg p-1.5 text-red-600 hover:bg-red-50"
+                                      >
+                                        <Trash2 className="h-3.5 w-3.5" />
+                                      </button>
+                                    </div>
                                   </td>
                                 </tr>
                               ))}
@@ -1756,15 +1849,31 @@ export default function App() {
                                 <span className="text-gray-400 font-semibold">
                                   {proj.startDate} – {proj.endDate}
                                 </span>
-                                <button
-                                  onClick={() => {
-                                    setActiveProjectKey(proj.id);
-                                    setAdminView("projectdetail");
-                                  }}
-                                  className="text-blue-600 hover:underline font-bold"
-                                >
-                                  Inspect Details ›
-                                </button>
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    onClick={() =>
+                                      setEditingProject({ ...proj })
+                                    }
+                                    className="font-bold text-blue-600"
+                                  >
+                                    {t("Edit")}
+                                  </button>
+                                  <button
+                                    onClick={() => handleDeleteProject(proj)}
+                                    className="font-bold text-red-600"
+                                  >
+                                    {t("Delete")}
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setActiveProjectKey(proj.id);
+                                      setAdminView("projectdetail");
+                                    }}
+                                    className="font-bold text-gray-700 hover:underline"
+                                  >
+                                    {t("Manage")}
+                                  </button>
+                                </div>
                               </div>
                             </div>
                           </div>
@@ -2345,6 +2454,22 @@ export default function App() {
                                     >
                                       {task.priority}
                                     </span>
+                                    <button
+                                      aria-label={`Edit ${task.name}`}
+                                      onClick={() =>
+                                        setEditingTask({ ...task })
+                                      }
+                                      className="rounded-lg p-1.5 text-blue-600 hover:bg-blue-50"
+                                    >
+                                      <Pencil className="h-3.5 w-3.5" />
+                                    </button>
+                                    <button
+                                      aria-label={`Delete ${task.name}`}
+                                      onClick={() => handleDeleteTask(task)}
+                                      className="rounded-lg p-1.5 text-red-600 hover:bg-red-50"
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" />
+                                    </button>
                                   </div>
                                 </div>
                               );
@@ -3349,6 +3474,196 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {editingProject && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-[#0E1526]/40 p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="edit-project-title"
+            className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"
+          >
+            <div className="mb-5 flex items-center justify-between">
+              <h3 id="edit-project-title" className="font-bold text-gray-900">
+                {t("Edit Project")}
+              </h3>
+              <button
+                aria-label="Close project editor"
+                onClick={() => setEditingProject(null)}
+              >
+                <X className="h-4 w-4 text-gray-400" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <input
+                value={editingProject.name}
+                onChange={(event) =>
+                  setEditingProject({
+                    ...editingProject,
+                    name: event.target.value,
+                  })
+                }
+                placeholder={t("Project Name")}
+                className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
+              />
+              <textarea
+                value={editingProject.description}
+                onChange={(event) =>
+                  setEditingProject({
+                    ...editingProject,
+                    description: event.target.value,
+                  })
+                }
+                placeholder={t("Description")}
+                className="min-h-24 w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
+              />
+              <div className="grid grid-cols-2 gap-3">
+                <input
+                  type="date"
+                  value={editingProject.startDate}
+                  onChange={(event) =>
+                    setEditingProject({
+                      ...editingProject,
+                      startDate: event.target.value,
+                    })
+                  }
+                  className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                />
+                <input
+                  type="date"
+                  value={editingProject.endDate}
+                  onChange={(event) =>
+                    setEditingProject({
+                      ...editingProject,
+                      endDate: event.target.value,
+                    })
+                  }
+                  className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                />
+              </div>
+              <input
+                type="color"
+                value={editingProject.color}
+                onChange={(event) =>
+                  setEditingProject({
+                    ...editingProject,
+                    color: event.target.value,
+                  })
+                }
+                className="h-10 w-full rounded-xl border border-gray-200"
+              />
+              <div className="flex gap-2 pt-2">
+                <button
+                  onClick={() => setEditingProject(null)}
+                  className="flex-1 rounded-xl border border-gray-200 py-2 text-xs font-bold"
+                >
+                  {t("Cancel")}
+                </button>
+                <button
+                  onClick={handleUpdateProject}
+                  className="flex-1 rounded-xl bg-[#0E1526] py-2 text-xs font-bold text-white"
+                >
+                  {t("Save Changes")}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editingTask && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-[#0E1526]/40 p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="edit-task-title"
+            className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"
+          >
+            <div className="mb-5 flex items-center justify-between">
+              <h3 id="edit-task-title" className="font-bold text-gray-900">
+                {t("Edit Task")}
+              </h3>
+              <button
+                aria-label="Close task editor"
+                onClick={() => setEditingTask(null)}
+              >
+                <X className="h-4 w-4 text-gray-400" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <input
+                value={editingTask.name}
+                onChange={(event) =>
+                  setEditingTask({ ...editingTask, name: event.target.value })
+                }
+                placeholder={t("Task Name")}
+                className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
+              />
+              <select
+                value={editingTask.assignedTo}
+                onChange={(event) =>
+                  setEditingTask({
+                    ...editingTask,
+                    assignedTo: event.target.value,
+                  })
+                }
+                className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
+              >
+                <option value="">{t("Unassigned")}</option>
+                {members.map((member) => (
+                  <option key={member.id} value={member.name}>
+                    {member.name}
+                  </option>
+                ))}
+              </select>
+              <div className="grid grid-cols-2 gap-3">
+                <select
+                  value={editingTask.priority}
+                  onChange={(event) =>
+                    setEditingTask({
+                      ...editingTask,
+                      priority: event.target.value as Task["priority"],
+                    })
+                  }
+                  className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                >
+                  <option value="High">{t("High")}</option>
+                  <option value="Medium">{t("Medium")}</option>
+                  <option value="Low">{t("Low")}</option>
+                </select>
+                <select
+                  value={editingTask.status}
+                  onChange={(event) =>
+                    setEditingTask({
+                      ...editingTask,
+                      status: event.target.value as Task["status"],
+                    })
+                  }
+                  className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                >
+                  <option value="Completed">{t("Completed")}</option>
+                  <option value="In Progress">{t("In Progress")}</option>
+                  <option value="Not Started">{t("Not Started")}</option>
+                </select>
+              </div>
+              <div className="flex gap-2 pt-2">
+                <button
+                  onClick={() => setEditingTask(null)}
+                  className="flex-1 rounded-xl border border-gray-200 py-2 text-xs font-bold"
+                >
+                  {t("Cancel")}
+                </button>
+                <button
+                  onClick={handleUpdateTask}
+                  className="flex-1 rounded-xl bg-[#0E1526] py-2 text-xs font-bold text-white"
+                >
+                  {t("Save Changes")}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* MODAL: INVITE MEMBER */}
       {isInviteModalOpen && (
