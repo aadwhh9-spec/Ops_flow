@@ -24,12 +24,8 @@ let _db: ReturnType<typeof drizzle> | null = null;
 let _client: postgres.Sql | null = null;
 
 export async function getDb() {
-  if (!process.env.DATABASE_URL) {
-    throw new Error("DATABASE_URL is missing. Add it to backend/.env");
-  }
-
   if (!_db) {
-    _client = postgres(process.env.DATABASE_URL, { prepare: false });
+    _client = postgres(ENV.databaseUrl, { prepare: false });
     _db = drizzle({ client: _client });
   }
 

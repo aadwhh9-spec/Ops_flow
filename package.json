@@ -5,6 +5,11 @@
   "license": "MIT",
   "scripts": {
     "dev": "vite",
+    "dev:frontend": "vite",
+    "dev:backend": "npm --prefix backend run dev",
+    "install:all": "npm install && npm --prefix backend install",
+    "check:all": "npm run check && npm --prefix backend run check",
+    "build:all": "npm run build && npm --prefix backend run build",
     "build": "vite build",
     "start": "vite preview",
     "check": "tsc --noEmit",
