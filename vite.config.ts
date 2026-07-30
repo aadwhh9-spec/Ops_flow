@@ -12,6 +12,18 @@ export default defineConfig(() => ({
     },
   },
 
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          react: ["react", "react-dom"],
+          motion: ["motion/react"],
+          icons: ["lucide-react"],
+        },
+      },
+    },
+  },
+
   server: {
     proxy: {
       "/api": {
