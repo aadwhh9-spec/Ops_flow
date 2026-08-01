@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from "react";
-import { Project, Task, Member, ChatMessage } from "./types";
+import { Fragment, useState, useEffect, useRef } from "react";
+import { Project, Task, Member, ChatMessage, AppNotification } from "./types";
 import { EN_TO_AR } from "./translations";
 import { getDaysRemaining } from "./utils";
 import { motion, AnimatePresence } from "motion/react";
@@ -37,7 +37,7 @@ export default function App() {
     id: number;
     name: string;
     email: string;
-    role: "user" | "admin";
+    role: "staff" | "admin" | "super_admin";
   };
 
   // Global App States
@@ -45,12 +45,21 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
+  const [contacts, setContacts] = useState<Member[]>([]);
   const [chats, setChats] = useState<ChatMessage[]>([]);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [unreadNotificationCount, setUnreadNotificationCount] = useState(0);
+  const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
   const [loading, setLoading] = useState(true);
 
   // Auth & Role states
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [isSignupMode, setIsSignupMode] = useState(false);
+  const [isResetMode, setIsResetMode] = useState(false);
+  const [resetCodeSent, setResetCodeSent] = useState(false);
+  const [resetCode, setResetCode] = useState("");
+  const [resetPassword, setResetPassword] = useState("");
+  const [resetMessage, setResetMessage] = useState("");
   const [selectedRole, setSelectedRole] = useState<"admin" | "staff">("admin");
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
@@ -96,6 +105,9 @@ export default function App() {
   );
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
+  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
+    new Set(),
+  );
 
   // AI Assistant Floating panel states
   const [isAiOpen, setIsAiOpen] = useState(false);
@@ -142,6 +154,7 @@ export default function App() {
       setProjects(data.projects ?? []);
       setTasks(data.tasks ?? []);
       setMembers(data.members ?? []);
+      setContacts(data.contacts ?? data.members ?? []);
       setChats(data.chats ?? []);
     } catch (err) {
       console.error("Failed to load workspace data:", err);
@@ -153,6 +166,18 @@ export default function App() {
     }
   };
 
+  const fetchNotifications = async () => {
+    try {
+      const res = await fetch("/api/notifications");
+      if (!res.ok) return;
+      const data = await res.json();
+      setNotifications(data.notifications ?? []);
+      setUnreadNotificationCount(data.unreadCount ?? 0);
+    } catch (err) {
+      console.error("Failed to load notifications:", err);
+    }
+  };
+
   useEffect(() => {
     const restoreSession = async () => {
       try {
@@ -161,9 +186,9 @@ export default function App() {
         const data = await res.json();
         const user = data.user as AuthUser;
         setCurrentUser(user);
-        setSelectedRole(user.role === "admin" ? "admin" : "staff");
+        setSelectedRole(user.role === "staff" ? "staff" : "admin");
         setIsLoggedIn(true);
-        await fetchWorkspace();
+        await Promise.all([fetchWorkspace(), fetchNotifications()]);
       } catch (err) {
         console.error("Failed to restore session:", err);
       } finally {
@@ -172,6 +197,14 @@ export default function App() {
     };
     restoreSession();
   }, []);
+
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    const timer = window.setInterval(() => {
+      void Promise.all([fetchNotifications(), fetchWorkspace()]);
+    }, 30000);
+    return () => window.clearInterval(timer);
+  }, [isLoggedIn]);
 
   useEffect(() => {
     if (chatEndRef.current) {
@@ -201,12 +234,12 @@ export default function App() {
       }
 
       const user = data.user as AuthUser;
-      const accountRole = user.role === "admin" ? "admin" : "staff";
+      const accountRole = user.role === "staff" ? "staff" : "admin";
       setCurrentUser(user);
       setSelectedRole(accountRole);
       setIsLoggedIn(true);
       accountRole === "admin" ? setAdminView("dash") : setStaffView("dash");
-      await fetchWorkspace();
+      await Promise.all([fetchWorkspace(), fetchNotifications()]);
     } catch (err) {
       setAppError(err instanceof Error ? err.message : "Login failed");
     }
@@ -233,14 +266,62 @@ export default function App() {
         throw new Error(data.error ?? `Signup failed (${res.status})`);
       const user = data.user as AuthUser;
       setCurrentUser(user);
-      setSelectedRole(user.role === "admin" ? "admin" : "staff");
-      await fetchWorkspace();
+      setSelectedRole(user.role === "staff" ? "staff" : "admin");
+      await Promise.all([fetchWorkspace(), fetchNotifications()]);
       setIsLoggedIn(true);
-      user.role === "admin" ? setAdminView("dash") : setStaffView("dash");
+      user.role !== "staff" ? setAdminView("dash") : setStaffView("dash");
     } catch (err) {
       console.error(err);
       setAppError("Account creation failed. Please try again.");
     }
+  };
+
+  const handleRequestPasswordReset = async () => {
+    if (!loginEmail.trim()) {
+      setAppError("Enter your email address.");
+      return;
+    }
+    setAppError("");
+    const res = await fetch("/api/auth/forgot-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: loginEmail.trim() }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setAppError(data.error ?? "Password reset request failed");
+      return;
+    }
+    setResetCodeSent(true);
+    setResetMessage(
+      data.developmentCode
+        ? `Development reset code: ${data.developmentCode}`
+        : data.message,
+    );
+  };
+
+  const handleResetPassword = async () => {
+    setAppError("");
+    const res = await fetch("/api/auth/reset-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: loginEmail.trim(),
+        code: resetCode,
+        password: resetPassword,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setAppError(data.error ?? "Password reset failed");
+      return;
+    }
+    setIsResetMode(false);
+    setResetCodeSent(false);
+    setResetCode("");
+    setResetPassword("");
+    setResetMessage("");
+    setAppError("");
   };
 
   const handleCreateProject = async () => {
@@ -275,7 +356,10 @@ export default function App() {
   };
 
   const handleAddTask = async () => {
-    if (!ntName) return;
+    if (!ntName || !ntAssignee) {
+      setAppError("Select a team member for this task.");
+      return;
+    }
     try {
       const res = await fetch("/api/tasks", {
         method: "POST",
@@ -283,12 +367,13 @@ export default function App() {
         body: JSON.stringify({
           projectId: activeProjectKey,
           name: ntName,
-          assignedTo: ntAssignee || currentUserName,
+          assigneeId: Number(ntAssignee),
           priority: ntPriority,
         }),
       });
       if (res.ok) {
         setNtName("");
+        setNtAssignee("");
         setIsAddTaskOpen(false);
         await fetchWorkspace();
       } else {
@@ -411,6 +496,10 @@ export default function App() {
           role: inviteRole || "Frontend Developer",
           department: "Engineering",
           projectId: inviteProjId || undefined,
+          systemRole:
+            adminView === "teamadmin" && currentUser?.role === "super_admin"
+              ? "admin"
+              : "staff",
         }),
       });
       if (res.ok) {
@@ -452,6 +541,88 @@ export default function App() {
       setAppError("The message could not be sent. Please try again.");
     }
   };
+
+  const unreadChatCount = (type: "proj" | "dm", targetId: string) =>
+    notifications.filter(
+      (notification) =>
+        !notification.isRead &&
+        notification.type === "message_received" &&
+        (type === "proj"
+          ? String(notification.relatedProjectId) === targetId
+          : String(notification.actorId) === targetId),
+    ).length;
+
+  const latestChatMessage = (type: "proj" | "dm", targetId: string) => {
+    const conversation = chats.filter(
+      (message) => message.type === type && message.targetId === targetId,
+    );
+    return conversation[conversation.length - 1];
+  };
+
+  const latestDirectMessageIndex = (targetId: string) =>
+    chats.reduce(
+      (latestIndex, message, index) =>
+        message.type === "dm" && message.targetId === targetId
+          ? index
+          : latestIndex,
+      -1,
+    );
+
+  const chatContacts = contacts
+    .filter((member) => member.name !== currentUser?.name)
+    .sort((left, right) => {
+      const unreadDifference =
+        unreadChatCount("dm", right.id) - unreadChatCount("dm", left.id);
+      if (unreadDifference !== 0) return unreadDifference;
+      const leftIndex = latestDirectMessageIndex(left.id);
+      const rightIndex = latestDirectMessageIndex(right.id);
+      return rightIndex - leftIndex;
+    });
+
+  const handleOpenConversation = async (
+    type: "proj" | "dm",
+    targetId: string,
+  ) => {
+    setChatType(type);
+    setChatTarget(targetId);
+    if (unreadChatCount(type, targetId) === 0) {
+      await fetchWorkspace();
+      return;
+    }
+    await Promise.all([
+      fetch("/api/notifications/read-chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type, targetId }),
+      }),
+      fetchWorkspace(),
+    ]);
+    await fetchNotifications();
+  };
+
+  useEffect(() => {
+    const directChatOpen =
+      (selectedRole === "admin" && adminView === "chatcontacts") ||
+      (selectedRole === "staff" && staffView === "chatcontacts");
+    const projectChatOpen =
+      (selectedRole === "admin" && adminView === "chatprojects") ||
+      (selectedRole === "staff" && staffView === "chatprojects");
+
+    if (directChatOpen) {
+      if (
+        !chatContacts.some((member) => member.id === chatTarget) &&
+        chatContacts[0]
+      ) {
+        void handleOpenConversation("dm", chatContacts[0].id);
+      }
+    } else if (
+      projectChatOpen &&
+      !projects.some((project) => project.id === chatTarget) &&
+      projects[0]
+    ) {
+      void handleOpenConversation("proj", projects[0].id);
+    }
+  }, [adminView, staffView, selectedRole, contacts, projects]);
 
   // Ask Gemini with Custom Loading message rotations
   const handleAskGemini = async () => {
@@ -628,12 +799,18 @@ export default function App() {
           </div>
 
           <h2 className="text-2xl font-bold text-center text-gray-900 mb-2">
-            {isSignupMode ? t("Sign Up") : t("Log In")}
+            {isResetMode
+              ? t("Reset Password")
+              : isSignupMode
+                ? t("Sign Up")
+                : t("Log In")}
           </h2>
           <p className="text-sm text-center text-gray-500 mb-6">
-            {isSignupMode
-              ? t("Create an administrator account")
-              : t("Enter your credentials to access the operations hub")}
+            {isResetMode
+              ? t("Use the code sent to your email")
+              : isSignupMode
+                ? t("Create an administrator account")
+                : t("Enter your credentials to access the operations hub")}
           </p>
           {appError && (
             <div
@@ -644,7 +821,74 @@ export default function App() {
             </div>
           )}
 
-          {!isSignupMode ? (
+          {isResetMode ? (
+            <form
+              className="space-y-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void (resetCodeSent
+                  ? handleResetPassword()
+                  : handleRequestPasswordReset());
+              }}
+            >
+              <div>
+                <label className="block text-xs font-bold text-gray-600 uppercase mb-1 tracking-wider">
+                  {t("Email")}
+                </label>
+                <input
+                  type="email"
+                  autoComplete="email"
+                  value={loginEmail}
+                  onChange={(event) => setLoginEmail(event.target.value)}
+                  className="w-full px-4 py-2.5 bg-[#FAFBFD] border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-800"
+                />
+              </div>
+              {resetCodeSent && (
+                <>
+                  {resetMessage && (
+                    <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-xs text-blue-700">
+                      {resetMessage}
+                    </div>
+                  )}
+                  <input
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={resetCode}
+                    onChange={(event) =>
+                      setResetCode(event.target.value.replace(/\D/g, ""))
+                    }
+                    placeholder={t("Six-digit code")}
+                    className="w-full px-4 py-2.5 bg-[#FAFBFD] border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-800"
+                  />
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    value={resetPassword}
+                    onChange={(event) => setResetPassword(event.target.value)}
+                    placeholder={t("New password")}
+                    className="w-full px-4 py-2.5 bg-[#FAFBFD] border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-800"
+                  />
+                </>
+              )}
+              <button
+                type="submit"
+                className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold"
+              >
+                {resetCodeSent ? t("Reset Password") : t("Send Reset Code")}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsResetMode(false);
+                  setResetCodeSent(false);
+                  setAppError("");
+                }}
+                className="w-full text-xs text-gray-500 hover:text-gray-900"
+              >
+                {t("Back to login")}
+              </button>
+            </form>
+          ) : !isSignupMode ? (
             <form
               className="space-y-4"
               onSubmit={(event) => {
@@ -683,11 +927,10 @@ export default function App() {
               <div className="flex justify-end mb-3">
                 <button
                   type="button"
-                  onClick={() =>
-                    setAppError(
-                      "Password reset is not connected to the backend yet.",
-                    )
-                  }
+                  onClick={() => {
+                    setAppError("");
+                    setIsResetMode(true);
+                  }}
                   className="text-xs text-blue-600 hover:text-blue-800 hover:underline"
                 >
                   {t("Forgot password?")}
@@ -1073,7 +1316,11 @@ export default function App() {
               <button
                 onClick={() => {
                   toggleSubmenu("team");
-                  setAdminView("teamadmin");
+                  setAdminView(
+                    currentUser?.role === "super_admin"
+                      ? "teamadmin"
+                      : "teammembers",
+                  );
                 }}
                 className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-bold tracking-wide transition-all ${
                   adminView === "teamadmin" || adminView === "teammembers"
@@ -1092,16 +1339,18 @@ export default function App() {
 
               {menuOpen.team && (
                 <div className="mt-1 ml-4 border-l border-gray-800 pl-3 space-y-1">
-                  <button
-                    onClick={() => setAdminView("teamadmin")}
-                    className={`w-full text-left px-2 py-1.5 rounded-md text-xs font-semibold ${
-                      adminView === "teamadmin"
-                        ? "text-blue-400"
-                        : "text-gray-400 hover:text-white"
-                    }`}
-                  >
-                    {t("Admin List")}
-                  </button>
+                  {currentUser?.role !== "staff" && (
+                    <button
+                      onClick={() => setAdminView("teamadmin")}
+                      className={`w-full text-left px-2 py-1.5 rounded-md text-xs font-semibold ${
+                        adminView === "teamadmin"
+                          ? "text-blue-400"
+                          : "text-gray-400 hover:text-white"
+                      }`}
+                    >
+                      {t("Admin List")}
+                    </button>
+                  )}
                   <button
                     onClick={() => setAdminView("teammembers")}
                     className={`w-full text-left px-2 py-1.5 rounded-md text-xs font-semibold ${
@@ -1233,7 +1482,11 @@ export default function App() {
             <div className="min-w-0">
               <h4 className="text-xs font-bold truncate">{currentUserName}</h4>
               <p className="text-[10px] text-gray-400 font-semibold uppercase">
-                {selectedRole === "admin" ? t("Super Admin") : t("Staff")}
+                {currentUser?.role === "super_admin"
+                  ? t("Super Admin")
+                  : currentUser?.role === "admin"
+                    ? t("Administrator")
+                    : t("Staff")}
               </p>
             </div>
           </div>
@@ -1289,9 +1542,80 @@ export default function App() {
               <span>{lang === "en" ? "العربية" : "EN"}</span>
             </button>
 
-            <div className="relative p-2 bg-gray-50 border border-gray-200 rounded-xl text-gray-500 hover:bg-gray-100 cursor-pointer transition-all">
-              <Bell className="w-4 h-4" />
-              <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 bg-blue-500 rounded-full"></span>
+            <div className="relative">
+              <button
+                onClick={() => setIsNotificationsOpen((open) => !open)}
+                aria-label={t("Notifications")}
+                className="relative p-2 bg-gray-50 border border-gray-200 rounded-xl text-gray-500 hover:bg-gray-100 transition-all"
+              >
+                <Bell className="w-4 h-4" />
+                {unreadNotificationCount > 0 && (
+                  <span className="absolute -top-1 -right-1 min-w-4 h-4 px-1 bg-blue-600 text-white text-[9px] font-bold rounded-full flex items-center justify-center">
+                    {unreadNotificationCount > 99
+                      ? "99+"
+                      : unreadNotificationCount}
+                  </span>
+                )}
+              </button>
+              {isNotificationsOpen && (
+                <div className="absolute right-0 mt-2 w-80 bg-white border border-gray-200 rounded-2xl shadow-xl z-50 overflow-hidden">
+                  <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+                    <h3 className="text-sm font-bold text-gray-900">
+                      {t("Notifications")}
+                    </h3>
+                    {unreadNotificationCount > 0 && (
+                      <button
+                        onClick={async () => {
+                          await fetch("/api/notifications/read-all", {
+                            method: "POST",
+                          });
+                          await fetchNotifications();
+                        }}
+                        className="text-[10px] font-bold text-blue-600"
+                      >
+                        {t("Mark all as read")}
+                      </button>
+                    )}
+                  </div>
+                  <div className="max-h-96 overflow-y-auto">
+                    {notifications.length === 0 ? (
+                      <p className="p-6 text-center text-xs text-gray-400">
+                        {t("No notifications")}
+                      </p>
+                    ) : (
+                      notifications.map((notification) => (
+                        <button
+                          key={notification.id}
+                          onClick={async () => {
+                            if (!notification.isRead) {
+                              await fetch(
+                                `/api/notifications/${notification.id}/read`,
+                                { method: "PATCH" },
+                              );
+                              await fetchNotifications();
+                            }
+                          }}
+                          className={`w-full text-left px-4 py-3 border-b border-gray-100 hover:bg-gray-50 ${notification.isRead ? "bg-white" : "bg-blue-50/60"}`}
+                        >
+                          <p className="text-xs font-bold text-gray-900">
+                            {notification.title}
+                          </p>
+                          {notification.body && (
+                            <p className="text-[11px] text-gray-500 mt-1">
+                              {notification.body}
+                            </p>
+                          )}
+                          <p className="text-[9px] text-gray-400 mt-1.5">
+                            {new Date(notification.createdAt).toLocaleString(
+                              lang === "ar" ? "ar-SA" : "en-US",
+                            )}
+                          </p>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-blue-600 to-indigo-600 text-white font-extrabold text-xs flex items-center justify-center shadow-md">
@@ -1669,102 +1993,242 @@ export default function App() {
                             </thead>
                             <tbody>
                               {projects.map((proj) => (
-                                <tr
-                                  key={proj.id}
-                                  className="border-b border-gray-100 hover:bg-gray-50/50 transition-all text-xs"
-                                >
-                                  <td className="p-4 pl-6 font-bold text-gray-900 min-w-[200px]">
-                                    <div className="flex items-center gap-2">
-                                      <span
-                                        className="w-2.5 h-2.5 rounded-full flex-shrink-0"
-                                        style={{ backgroundColor: proj.color }}
-                                      ></span>
-                                      <span>{proj.name}</span>
-                                    </div>
-                                  </td>
-                                  <td className="p-4">
-                                    <span
-                                      className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                                        proj.status === "In Progress"
-                                          ? "bg-blue-50 text-blue-600"
-                                          : "bg-purple-50 text-purple-600"
-                                      }`}
-                                    >
-                                      {proj.status}
-                                    </span>
-                                  </td>
-                                  <td className="p-4 text-gray-500">
-                                    {proj.startDate} - {proj.endDate}
-                                    <div
-                                      className={`text-[10px] font-semibold mt-1 ${getDaysRemaining(proj.endDate).isOverdue ? "text-red-500" : "text-gray-400"}`}
-                                    >
-                                      {getDaysRemaining(proj.endDate).text}
-                                    </div>
-                                  </td>
-                                  <td className="p-4">
-                                    <div className="flex items-center gap-2">
-                                      <span className="font-bold">
-                                        {proj.progress}%
-                                      </span>
-                                      <div className="w-16 h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                                        <div
-                                          className="h-full rounded-full"
+                                <Fragment key={proj.id}>
+                                  <tr
+                                    key={proj.id}
+                                    className="border-b border-gray-100 hover:bg-gray-50/50 transition-all text-xs"
+                                  >
+                                    <td className="p-4 pl-6 font-bold text-gray-900 min-w-[200px]">
+                                      <div className="flex items-center gap-2">
+                                        {selectedRole === "admin" && (
+                                          <button
+                                            aria-label={`${expandedProjects.has(proj.id) ? "Collapse" : "Expand"} ${proj.name}`}
+                                            onClick={() =>
+                                              setExpandedProjects((current) => {
+                                                const next = new Set(current);
+                                                next.has(proj.id)
+                                                  ? next.delete(proj.id)
+                                                  : next.add(proj.id);
+                                                return next;
+                                              })
+                                            }
+                                            className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-600 shadow-sm hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600"
+                                          >
+                                            <ChevronRight
+                                              className={`w-3.5 h-3.5 transition-transform ${expandedProjects.has(proj.id) ? "rotate-90" : ""}`}
+                                            />
+                                          </button>
+                                        )}
+                                        <span
+                                          className="w-2.5 h-2.5 rounded-full flex-shrink-0"
                                           style={{
-                                            width: `${proj.progress}%`,
                                             backgroundColor: proj.color,
                                           }}
-                                        ></div>
+                                        ></span>
+                                        <span>{proj.name}</span>
                                       </div>
-                                    </div>
-                                  </td>
-                                  <td className="p-4">
-                                    <div className="flex -space-x-1 overflow-hidden">
-                                      {proj.team.map((n, idx) => (
-                                        <div
-                                          key={idx}
-                                          title={n}
-                                          className="inline-block h-6 w-6 rounded-full ring-2 ring-white bg-blue-600 text-white font-black text-[9px] flex items-center justify-center"
-                                        >
-                                          {n
-                                            .split(" ")
-                                            .map((word) => word[0])
-                                            .join("")}
+                                    </td>
+                                    <td className="p-4">
+                                      <span
+                                        className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                          proj.status === "In Progress"
+                                            ? "bg-blue-50 text-blue-600"
+                                            : "bg-purple-50 text-purple-600"
+                                        }`}
+                                      >
+                                        {proj.status}
+                                      </span>
+                                    </td>
+                                    <td className="p-4 text-gray-500">
+                                      {proj.startDate} - {proj.endDate}
+                                      <div
+                                        className={`text-[10px] font-semibold mt-1 ${getDaysRemaining(proj.endDate).isOverdue ? "text-red-500" : "text-gray-400"}`}
+                                      >
+                                        {getDaysRemaining(proj.endDate).text}
+                                      </div>
+                                    </td>
+                                    <td className="p-4">
+                                      <div className="flex items-center gap-2">
+                                        <span className="font-bold">
+                                          {proj.progress}%
+                                        </span>
+                                        <div className="w-16 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                                          <div
+                                            className="h-full rounded-full"
+                                            style={{
+                                              width: `${proj.progress}%`,
+                                              backgroundColor: proj.color,
+                                            }}
+                                          ></div>
                                         </div>
-                                      ))}
-                                    </div>
-                                  </td>
-                                  <td className="p-4 text-center">
-                                    <div className="flex items-center justify-center gap-1">
-                                      <button
-                                        onClick={() => {
-                                          setActiveProjectKey(proj.id);
-                                          setAdminView("projectdetail");
-                                        }}
-                                        className="px-3 py-1 bg-gray-50 hover:bg-gray-100 text-gray-700 rounded-lg font-bold text-[10px] transition-all"
-                                      >
-                                        {t("Manage")}
-                                      </button>
-                                      <button
-                                        aria-label={`Edit ${proj.name}`}
-                                        onClick={() =>
-                                          setEditingProject({ ...proj })
-                                        }
-                                        className="rounded-lg p-1.5 text-blue-600 hover:bg-blue-50"
-                                      >
-                                        <Pencil className="h-3.5 w-3.5" />
-                                      </button>
-                                      <button
-                                        aria-label={`Delete ${proj.name}`}
-                                        onClick={() =>
-                                          handleDeleteProject(proj)
-                                        }
-                                        className="rounded-lg p-1.5 text-red-600 hover:bg-red-50"
-                                      >
-                                        <Trash2 className="h-3.5 w-3.5" />
-                                      </button>
-                                    </div>
-                                  </td>
-                                </tr>
+                                      </div>
+                                    </td>
+                                    <td className="p-4">
+                                      <div className="flex -space-x-1 overflow-hidden">
+                                        {(proj.participants ?? [])
+                                          .filter(
+                                            (participant) =>
+                                              !participant.isOwner &&
+                                              participant.systemRole ===
+                                                "staff",
+                                          )
+                                          .map((participant) => (
+                                            <div
+                                              key={participant.id}
+                                              title={participant.name}
+                                              className="inline-block h-6 w-6 rounded-full ring-2 ring-white bg-blue-600 text-white font-black text-[9px] flex items-center justify-center"
+                                            >
+                                              {participant.name
+                                                .split(" ")
+                                                .map((word) => word[0])
+                                                .join("")}
+                                            </div>
+                                          ))}
+                                      </div>
+                                    </td>
+                                    <td className="p-4 text-center">
+                                      <div className="flex items-center justify-center gap-1">
+                                        <button
+                                          onClick={() => {
+                                            setActiveProjectKey(proj.id);
+                                            setAdminView("projectdetail");
+                                          }}
+                                          className="px-3 py-1 bg-gray-50 hover:bg-gray-100 text-gray-700 rounded-lg font-bold text-[10px] transition-all"
+                                        >
+                                          {t("Manage")}
+                                        </button>
+                                        <button
+                                          aria-label={`Edit ${proj.name}`}
+                                          onClick={() =>
+                                            setEditingProject({ ...proj })
+                                          }
+                                          className="rounded-lg p-1.5 text-blue-600 hover:bg-blue-50"
+                                        >
+                                          <Pencil className="h-3.5 w-3.5" />
+                                        </button>
+                                        <button
+                                          aria-label={`Delete ${proj.name}`}
+                                          onClick={() =>
+                                            handleDeleteProject(proj)
+                                          }
+                                          className="rounded-lg p-1.5 text-red-600 hover:bg-red-50"
+                                        >
+                                          <Trash2 className="h-3.5 w-3.5" />
+                                        </button>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                  {selectedRole === "admin" &&
+                                    expandedProjects.has(proj.id) && (
+                                      <tr className="border-b border-gray-100 bg-slate-50/80">
+                                        <td colSpan={6} className="px-8 py-5">
+                                          <div
+                                            className={`grid gap-5 ${currentUser?.role === "super_admin" ? "md:grid-cols-2" : ""}`}
+                                          >
+                                            {currentUser?.role ===
+                                              "super_admin" && (
+                                              <div>
+                                                <h4 className="mb-3 text-[10px] font-extrabold uppercase tracking-wider text-purple-600">
+                                                  {t("Project Admin")}
+                                                </h4>
+                                                <div className="space-y-2">
+                                                  {(proj.participants ?? [])
+                                                    .filter(
+                                                      (participant) =>
+                                                        participant.isOwner ||
+                                                        (participant.projectRole ===
+                                                          "manager" &&
+                                                          participant.systemRole !==
+                                                            "staff"),
+                                                    )
+                                                    .map((participant) => (
+                                                      <div
+                                                        key={participant.id}
+                                                        className="flex items-center gap-3 rounded-xl border border-purple-100 bg-white p-3"
+                                                      >
+                                                        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-purple-100 text-[10px] font-black text-purple-700">
+                                                          {participant.name
+                                                            .split(/\s+/)
+                                                            .map(
+                                                              (part) => part[0],
+                                                            )
+                                                            .join("")
+                                                            .slice(0, 2)
+                                                            .toUpperCase()}
+                                                        </div>
+                                                        <div>
+                                                          <p className="text-xs font-bold text-gray-900">
+                                                            {participant.name}
+                                                          </p>
+                                                          <p className="text-[10px] text-gray-400">
+                                                            {participant.email}{" "}
+                                                            ·{" "}
+                                                            {participant.isOwner
+                                                              ? t("Owner")
+                                                              : t("Manager")}
+                                                          </p>
+                                                        </div>
+                                                      </div>
+                                                    ))}
+                                                </div>
+                                              </div>
+                                            )}
+                                            <div>
+                                              <h4 className="mb-3 text-[10px] font-extrabold uppercase tracking-wider text-blue-600">
+                                                {t("Team Members")}
+                                              </h4>
+                                              <div className="grid gap-2 sm:grid-cols-2">
+                                                {(
+                                                  proj.participants ?? []
+                                                ).filter(
+                                                  (participant) =>
+                                                    !participant.isOwner &&
+                                                    !(
+                                                      participant.projectRole ===
+                                                        "manager" &&
+                                                      participant.systemRole !==
+                                                        "staff"
+                                                    ),
+                                                ).length === 0 ? (
+                                                  <p className="text-xs text-gray-400">
+                                                    {t("No team members")}
+                                                  </p>
+                                                ) : (
+                                                  (proj.participants ?? [])
+                                                    .filter(
+                                                      (participant) =>
+                                                        !participant.isOwner &&
+                                                        !(
+                                                          participant.projectRole ===
+                                                            "manager" &&
+                                                          participant.systemRole !==
+                                                            "staff"
+                                                        ),
+                                                    )
+                                                    .map((participant) => (
+                                                      <div
+                                                        key={participant.id}
+                                                        className="rounded-xl border border-gray-100 bg-white p-3"
+                                                      >
+                                                        <p className="text-xs font-bold text-gray-900">
+                                                          {participant.name}
+                                                        </p>
+                                                        <p className="mt-0.5 text-[10px] text-gray-400">
+                                                          {participant.email} ·{" "}
+                                                          {
+                                                            participant.projectRole
+                                                          }
+                                                        </p>
+                                                      </div>
+                                                    ))
+                                                )}
+                                              </div>
+                                            </div>
+                                          </div>
+                                        </td>
+                                      </tr>
+                                    )}
+                                </Fragment>
                               ))}
                             </tbody>
                           </table>
@@ -2515,10 +2979,9 @@ export default function App() {
                                 projects.map((proj) => (
                                   <div
                                     key={proj.id}
-                                    onClick={() => {
-                                      setChatType("proj");
-                                      setChatTarget(proj.id);
-                                    }}
+                                    onClick={() =>
+                                      handleOpenConversation("proj", proj.id)
+                                    }
                                     className={`flex items-center gap-3 p-3 rounded-xl cursor-pointer transition-all ${
                                       chatType === "proj" &&
                                       chatTarget === proj.id
@@ -2537,24 +3000,34 @@ export default function App() {
                                         <h4 className="font-bold text-xs text-gray-900 truncate">
                                           {proj.name}
                                         </h4>
-                                        <span className="text-[9px] text-gray-400">
-                                          9:21 AM
-                                        </span>
+                                        {unreadChatCount("proj", proj.id) >
+                                          0 && (
+                                          <span className="min-w-5 h-5 px-1.5 rounded-full bg-blue-600 text-white text-[10px] font-bold flex items-center justify-center">
+                                            {unreadChatCount("proj", proj.id)}
+                                          </span>
+                                        )}
+                                        {unreadChatCount("proj", proj.id) ===
+                                          0 && (
+                                          <span className="text-[9px] text-gray-400">
+                                            {latestChatMessage("proj", proj.id)
+                                              ?.timestamp ?? ""}
+                                          </span>
+                                        )}
                                       </div>
                                       <p className="text-[10px] text-gray-400 truncate mt-0.5">
-                                        Project development group chat
+                                        {latestChatMessage("proj", proj.id)
+                                          ?.text ?? t("No messages yet")}
                                       </p>
                                     </div>
                                   </div>
                                 ))
                               : // DMs members list
-                                members.map((m) => (
+                                chatContacts.map((m) => (
                                   <div
                                     key={m.id}
-                                    onClick={() => {
-                                      setChatType("dm");
-                                      setChatTarget(m.id);
-                                    }}
+                                    onClick={() =>
+                                      handleOpenConversation("dm", m.id)
+                                    }
                                     className={`flex items-center gap-3 p-3 rounded-xl cursor-pointer transition-all ${
                                       chatType === "dm" && chatTarget === m.id
                                         ? "bg-blue-50"
@@ -2579,12 +3052,21 @@ export default function App() {
                                         <h4 className="font-bold text-xs text-gray-900 truncate">
                                           {m.name}
                                         </h4>
-                                        <span className="text-[9px] text-gray-400">
-                                          9:10 AM
-                                        </span>
+                                        {unreadChatCount("dm", m.id) > 0 && (
+                                          <span className="min-w-5 h-5 px-1.5 rounded-full bg-blue-600 text-white text-[10px] font-bold flex items-center justify-center">
+                                            {unreadChatCount("dm", m.id)}
+                                          </span>
+                                        )}
+                                        {unreadChatCount("dm", m.id) === 0 && (
+                                          <span className="text-[9px] text-gray-400">
+                                            {latestChatMessage("dm", m.id)
+                                              ?.timestamp ?? ""}
+                                          </span>
+                                        )}
                                       </div>
                                       <p className="text-[10px] text-gray-400 truncate mt-0.5">
-                                        {m.role}
+                                        {latestChatMessage("dm", m.id)?.text ??
+                                          t("No messages yet")}
                                       </p>
                                     </div>
                                   </div>
@@ -2605,7 +3087,7 @@ export default function App() {
                                   {chatType === "proj"
                                     ? projects.find((p) => p.id === chatTarget)
                                         ?.name
-                                    : members.find((m) => m.id === chatTarget)
+                                    : contacts.find((m) => m.id === chatTarget)
                                         ?.name}
                                 </h4>
                                 <p className="text-[10px] text-gray-400 font-medium">
@@ -2689,100 +3171,179 @@ export default function App() {
                   )}
 
                   {/* ADMIN VIEW: ADMIN STAFF DIRECTORY LIST */}
-                  {adminView === "teamadmin" && (
-                    <div className="space-y-6">
-                      <div className="flex justify-between items-center">
-                        <h2 className="text-xl font-bold text-gray-900">
-                          {t("Administrators")}
-                        </h2>
-                        <button
-                          onClick={() => setIsInviteModalOpen(true)}
-                          className="px-4 py-2 bg-[#0E1526] hover:bg-gray-800 text-white font-semibold text-xs rounded-xl flex items-center gap-1 shadow-sm transition-all"
-                        >
-                          <UserPlus className="w-4 h-4" />
-                          <span>{t("Add Admin")}</span>
-                        </button>
-                      </div>
-
-                      <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm space-y-6">
-                        {/* Ahmed Hassan Card */}
-                        <div className="pb-6 border-b border-gray-100">
-                          <div className="flex items-center gap-4">
-                            <div className="w-12 h-12 rounded-full bg-gradient-to-tr from-purple-500 to-indigo-600 text-white font-bold text-sm flex items-center justify-center shadow-sm">
-                              AH
-                            </div>
-                            <div>
-                              <h3 className="font-bold text-sm text-gray-900">
-                                Ahmed Hassan
-                              </h3>
-                              <p className="text-xs text-gray-400">
-                                ahmed.h@opsflow.io · Admin since Jan 2024
-                              </p>
-                            </div>
-                          </div>
-
-                          <div className="mt-4 ml-16 bg-gray-50 p-4 rounded-xl border border-gray-100 space-y-3">
-                            <h4 className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
-                              Managed Pipelines
-                            </h4>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                              {projects.slice(0, 2).map((p) => (
-                                <div
-                                  key={p.id}
-                                  className="flex items-center justify-between text-xs bg-white p-2.5 rounded-lg border border-gray-100"
-                                >
-                                  <span className="font-semibold text-gray-700">
-                                    {p.name}
-                                  </span>
-                                  <span className="font-bold text-blue-500">
-                                    {p.progress}%
-                                  </span>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
+                  {adminView === "teamadmin" &&
+                    currentUser?.role === "super_admin" && (
+                      <div className="space-y-6">
+                        <div className="flex justify-between items-center">
+                          <h2 className="text-xl font-bold text-gray-900">
+                            {t("Administrators")}
+                          </h2>
+                          <button
+                            onClick={() => setIsInviteModalOpen(true)}
+                            className="px-4 py-2 bg-[#0E1526] hover:bg-gray-800 text-white font-semibold text-xs rounded-xl flex items-center gap-1 shadow-sm transition-all"
+                          >
+                            <UserPlus className="w-4 h-4" />
+                            <span>{t("Add Admin")}</span>
+                          </button>
                         </div>
 
-                        {/* Nadia Qasim Card */}
-                        <div>
-                          <div className="flex items-center gap-4">
-                            <div className="w-12 h-12 rounded-full bg-gradient-to-tr from-pink-500 to-rose-600 text-white font-bold text-sm flex items-center justify-center shadow-sm">
-                              NQ
-                            </div>
-                            <div>
-                              <h3 className="font-bold text-sm text-gray-900">
-                                Nadia Qasim
-                              </h3>
-                              <p className="text-xs text-gray-400">
-                                nadia.q@opsflow.io · Admin since Mar 2023
-                              </p>
-                            </div>
-                          </div>
-
-                          <div className="mt-4 ml-16 bg-gray-50 p-4 rounded-xl border border-gray-100 space-y-3">
-                            <h4 className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
-                              Managed Pipelines
-                            </h4>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                              {projects.slice(2, 5).map((p) => (
-                                <div
-                                  key={p.id}
-                                  className="flex items-center justify-between text-xs bg-white p-2.5 rounded-lg border border-gray-100"
-                                >
-                                  <span className="font-semibold text-gray-700">
-                                    {p.name}
-                                  </span>
-                                  <span className="font-bold text-blue-500">
-                                    {p.progress}%
-                                  </span>
+                        <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm space-y-6">
+                          {members.filter((member) =>
+                            ["Administrator", "Super Admin"].includes(
+                              member.role,
+                            ),
+                          ).length === 0 ? (
+                            <p className="py-8 text-center text-sm text-gray-400">
+                              {t("No administrators found")}
+                            </p>
+                          ) : (
+                            members
+                              .filter((member) =>
+                                ["Administrator", "Super Admin"].includes(
+                                  member.role,
+                                ),
+                              )
+                              .map((member) => {
+                                const memberProjects = projects.filter(
+                                  (project) =>
+                                    project.team.includes(member.name),
+                                );
+                                return (
+                                  <div
+                                    key={member.id}
+                                    className="pb-6 border-b border-gray-100 last:border-0 last:pb-0"
+                                  >
+                                    <div className="flex items-center gap-4">
+                                      <div className="w-12 h-12 rounded-full bg-gradient-to-tr from-purple-500 to-indigo-600 text-white font-bold text-sm flex items-center justify-center shadow-sm">
+                                        {member.name
+                                          .split(/\s+/)
+                                          .map((part) => part[0])
+                                          .join("")
+                                          .slice(0, 2)
+                                          .toUpperCase()}
+                                      </div>
+                                      <div>
+                                        <h3 className="font-bold text-sm text-gray-900">
+                                          {member.name}
+                                        </h3>
+                                        <p className="text-xs text-gray-400">
+                                          {member.email} · {member.role} ·{" "}
+                                          {member.since}
+                                        </p>
+                                      </div>
+                                    </div>
+                                    <div className="mt-4 ml-16 bg-gray-50 p-4 rounded-xl border border-gray-100 space-y-3">
+                                      <h4 className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
+                                        {t("Member Projects")}
+                                      </h4>
+                                      {memberProjects.length === 0 ? (
+                                        <p className="text-xs text-gray-400">
+                                          {t("Not assigned to any project")}
+                                        </p>
+                                      ) : (
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                          {memberProjects.map((project) => (
+                                            <div
+                                              key={project.id}
+                                              className="flex items-center justify-between text-xs bg-white p-2.5 rounded-lg border border-gray-100"
+                                            >
+                                              <span className="font-semibold text-gray-700">
+                                                {project.name}
+                                              </span>
+                                              <span className="font-bold text-blue-500">
+                                                {project.progress}%
+                                              </span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })
+                          )}
+                          {false && (
+                            <>
+                              {/* Ahmed Hassan Card */}
+                              <div className="pb-6 border-b border-gray-100">
+                                <div className="flex items-center gap-4">
+                                  <div className="w-12 h-12 rounded-full bg-gradient-to-tr from-purple-500 to-indigo-600 text-white font-bold text-sm flex items-center justify-center shadow-sm">
+                                    AH
+                                  </div>
+                                  <div>
+                                    <h3 className="font-bold text-sm text-gray-900">
+                                      Ahmed Hassan
+                                    </h3>
+                                    <p className="text-xs text-gray-400">
+                                      ahmed.h@opsflow.io · Admin since Jan 2024
+                                    </p>
+                                  </div>
                                 </div>
-                              ))}
-                            </div>
-                          </div>
+
+                                <div className="mt-4 ml-16 bg-gray-50 p-4 rounded-xl border border-gray-100 space-y-3">
+                                  <h4 className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
+                                    Managed Pipelines
+                                  </h4>
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    {projects.slice(0, 2).map((p) => (
+                                      <div
+                                        key={p.id}
+                                        className="flex items-center justify-between text-xs bg-white p-2.5 rounded-lg border border-gray-100"
+                                      >
+                                        <span className="font-semibold text-gray-700">
+                                          {p.name}
+                                        </span>
+                                        <span className="font-bold text-blue-500">
+                                          {p.progress}%
+                                        </span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Nadia Qasim Card */}
+                              <div>
+                                <div className="flex items-center gap-4">
+                                  <div className="w-12 h-12 rounded-full bg-gradient-to-tr from-pink-500 to-rose-600 text-white font-bold text-sm flex items-center justify-center shadow-sm">
+                                    NQ
+                                  </div>
+                                  <div>
+                                    <h3 className="font-bold text-sm text-gray-900">
+                                      Nadia Qasim
+                                    </h3>
+                                    <p className="text-xs text-gray-400">
+                                      nadia.q@opsflow.io · Admin since Mar 2023
+                                    </p>
+                                  </div>
+                                </div>
+
+                                <div className="mt-4 ml-16 bg-gray-50 p-4 rounded-xl border border-gray-100 space-y-3">
+                                  <h4 className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
+                                    Managed Pipelines
+                                  </h4>
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    {projects.slice(2, 5).map((p) => (
+                                      <div
+                                        key={p.id}
+                                        className="flex items-center justify-between text-xs bg-white p-2.5 rounded-lg border border-gray-100"
+                                      >
+                                        <span className="font-semibold text-gray-700">
+                                          {p.name}
+                                        </span>
+                                        <span className="font-bold text-blue-500">
+                                          {p.progress}%
+                                        </span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+                            </>
+                          )}
                         </div>
                       </div>
-                    </div>
-                  )}
+                    )}
 
                   {/* ADMIN VIEW: TEAM MEMBERS DIRECTORY CARD GRID */}
                   {adminView === "teammembers" && (
@@ -3190,10 +3751,9 @@ export default function App() {
                               ? projects.map((proj) => (
                                   <div
                                     key={proj.id}
-                                    onClick={() => {
-                                      setChatType("proj");
-                                      setChatTarget(proj.id);
-                                    }}
+                                    onClick={() =>
+                                      handleOpenConversation("proj", proj.id)
+                                    }
                                     className={`flex items-center gap-3 p-3 rounded-xl cursor-pointer transition-all ${
                                       chatType === "proj" &&
                                       chatTarget === proj.id
@@ -3212,26 +3772,35 @@ export default function App() {
                                         <h4 className="font-bold text-xs text-gray-900 truncate">
                                           {proj.name}
                                         </h4>
-                                        <span className="text-[9px] text-gray-400">
-                                          9:21 AM
-                                        </span>
+                                        {unreadChatCount("proj", proj.id) >
+                                          0 && (
+                                          <span className="min-w-5 h-5 px-1.5 rounded-full bg-blue-600 text-white text-[10px] font-bold flex items-center justify-center">
+                                            {unreadChatCount("proj", proj.id)}
+                                          </span>
+                                        )}
+                                        {unreadChatCount("proj", proj.id) ===
+                                          0 && (
+                                          <span className="text-[9px] text-gray-400">
+                                            {latestChatMessage("proj", proj.id)
+                                              ?.timestamp ?? ""}
+                                          </span>
+                                        )}
                                       </div>
                                       <p className="text-[10px] text-gray-400 truncate mt-0.5">
-                                        Group chat
+                                        {latestChatMessage("proj", proj.id)
+                                          ?.text ?? t("No messages yet")}
                                       </p>
                                     </div>
                                   </div>
                                 ))
                               : // Contact direct conversations list for staff
-                                members.map((m) => {
-                                  if (m.name === currentUserName) return null;
+                                chatContacts.map((m) => {
                                   return (
                                     <div
                                       key={m.id}
-                                      onClick={() => {
-                                        setChatType("dm");
-                                        setChatTarget(m.id);
-                                      }}
+                                      onClick={() =>
+                                        handleOpenConversation("dm", m.id)
+                                      }
                                       className={`flex items-center gap-3 p-3 rounded-xl cursor-pointer transition-all ${
                                         chatType === "dm" && chatTarget === m.id
                                           ? "bg-blue-50"
@@ -3245,11 +3814,19 @@ export default function App() {
                                           .join("")}
                                       </div>
                                       <div className="min-w-0 flex-1">
-                                        <h4 className="font-bold text-xs text-gray-900 truncate">
-                                          {m.name}
-                                        </h4>
+                                        <div className="flex items-center justify-between gap-2">
+                                          <h4 className="font-bold text-xs text-gray-900 truncate">
+                                            {m.name}
+                                          </h4>
+                                          {unreadChatCount("dm", m.id) > 0 && (
+                                            <span className="min-w-5 h-5 px-1.5 rounded-full bg-blue-600 text-white text-[10px] font-bold flex items-center justify-center">
+                                              {unreadChatCount("dm", m.id)}
+                                            </span>
+                                          )}
+                                        </div>
                                         <p className="text-[10px] text-gray-400 truncate mt-0.5">
-                                          {m.role}
+                                          {latestChatMessage("dm", m.id)
+                                            ?.text ?? t("No messages yet")}
                                         </p>
                                       </div>
                                     </div>
@@ -3265,7 +3842,7 @@ export default function App() {
                               {chatType === "proj"
                                 ? projects.find((p) => p.id === chatTarget)
                                     ?.name
-                                : members.find((m) => m.id === chatTarget)
+                                : contacts.find((m) => m.id === chatTarget)
                                     ?.name}
                             </h4>
                             <p className="text-[10px] text-gray-400 font-medium">
@@ -3600,21 +4177,33 @@ export default function App() {
                 className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
               />
               <select
-                value={editingTask.assignedTo}
-                onChange={(event) =>
+                value={editingTask.assigneeId ?? ""}
+                onChange={(event) => {
+                  const participant = projects
+                    .find((project) => project.id === editingTask.projectId)
+                    ?.participants.find(
+                      (item) => item.id === event.target.value,
+                    );
                   setEditingTask({
                     ...editingTask,
-                    assignedTo: event.target.value,
-                  })
-                }
+                    assigneeId: event.target.value || null,
+                    assignedTo: participant?.name ?? "Unassigned",
+                  });
+                }}
                 className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
               >
                 <option value="">{t("Unassigned")}</option>
-                {members.map((member) => (
-                  <option key={member.id} value={member.name}>
-                    {member.name}
-                  </option>
-                ))}
+                {(
+                  projects.find(
+                    (project) => project.id === editingTask.projectId,
+                  )?.participants ?? []
+                )
+                  .filter((participant) => participant.systemRole === "staff")
+                  .map((participant) => (
+                    <option key={participant.id} value={participant.id}>
+                      {participant.name}
+                    </option>
+                  ))}
               </select>
               <div className="grid grid-cols-2 gap-3">
                 <select
@@ -3804,11 +4393,16 @@ export default function App() {
                   onChange={(e) => setNtAssignee(e.target.value)}
                   className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-800"
                 >
-                  {members
-                    .filter((m) => activeProject?.team.includes(m.name))
-                    .map((m) => (
-                      <option key={m.id} value={m.name}>
-                        {m.name}
+                  <option value="">{t("Select team member")}</option>
+                  {(activeProject?.participants ?? [])
+                    .filter(
+                      (participant) =>
+                        !participant.isOwner &&
+                        participant.systemRole === "staff",
+                    )
+                    .map((participant) => (
+                      <option key={participant.id} value={participant.id}>
+                        {participant.name}
                       </option>
                     ))}
                 </select>

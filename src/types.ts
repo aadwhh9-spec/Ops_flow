@@ -8,6 +8,28 @@ export interface Project {
   progress: number;
   color: string;
   team: string[];
+  participants: ProjectParticipant[];
+}
+
+export interface ProjectParticipant {
+  id: string;
+  name: string;
+  email: string;
+  systemRole: "staff" | "admin" | "super_admin";
+  projectRole: "viewer" | "member" | "manager";
+  isOwner: boolean;
+}
+
+export interface AppNotification {
+  id: number;
+  type: string;
+  title: string;
+  body: string | null;
+  isRead: boolean;
+  relatedProjectId: number | null;
+  relatedTaskId: number | null;
+  actorId: number | null;
+  createdAt: string;
 }
 
 export interface Task {
@@ -15,6 +37,7 @@ export interface Task {
   projectId: string;
   name: string;
   assignedTo: string;
+  assigneeId: string | null;
   priority: "High" | "Medium" | "Low";
   status: "Completed" | "In Progress" | "Not Started";
   date: string;

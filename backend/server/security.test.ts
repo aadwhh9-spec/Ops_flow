@@ -10,7 +10,7 @@ const databaseUser: User = {
   avatarUrl: null,
   loginMethod: "password",
   passwordHash: "secret-hash",
-  role: "user",
+  role: "staff",
   createdAt: new Date(),
   updatedAt: new Date(),
   lastSignedIn: new Date(),
@@ -23,7 +23,7 @@ describe("toPublicUser", () => {
       id: 7,
       name: "Example Member",
       email: "member@example.com",
-      role: "user",
+      role: "staff",
     });
     expect(result).not.toHaveProperty("passwordHash");
     expect(result).not.toHaveProperty("openId");

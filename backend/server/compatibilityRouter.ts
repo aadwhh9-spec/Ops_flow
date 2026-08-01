@@ -1,11 +1,14 @@
 ﻿import { GoogleGenAI } from "@google/genai";
 import { Router, type Request, type Response } from "express";
+import { createHash, randomInt } from "crypto";
 import { COOKIE_NAME } from "@shared/const";
 import { hashPassword, signSessionToken, verifyPassword } from "./_core/auth";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { createContext } from "./_core/trpc";
 import {
   addProjectMember,
+  createNotification,
+  createPasswordResetToken,
   createProject,
   createTask,
   deleteProject,
@@ -14,28 +17,80 @@ import {
   getAllTasks,
   getAllTasksForUser,
   getAllUsers,
+  getStaffUsers,
+  getUsersForProjects,
   getProjectMembers,
+  getProjectMember,
   getProjectById,
   getProjectRooms,
   getProjectsForUser,
   getTaskById,
   getMessages,
+  getNotificationsForUser,
+  getUnreadNotificationCount,
   getOrCreateDirectRoom,
   getOrCreateProjectRoom,
   getDirectRoomsForUser,
   getUserByEmail,
   isProjectMember,
+  markAllNotificationsRead,
+  markChatNotificationsRead,
+  markNotificationRead,
+  resetPasswordWithToken,
   sendMessage,
   updateProject,
   updateTask,
+  updateUserRole,
   upsertUser,
 } from "./db";
 import { isAcceptablePassword, toPublicUser } from "./security";
+import { ENV } from "./_core/env";
+import {
+  canCreateProject,
+  canDeleteProject,
+  canManageMembers,
+  canManageTasks,
+  canUpdateProject,
+  canViewProject,
+  isSuperAdmin,
+} from "./permissions";
 
 export const compatibilityRouter = Router();
 const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const MAX_LOGIN_ATTEMPTS = 5;
+const resetAttempts = new Map<string, { count: number; resetAt: number }>();
+const resetVerificationAttempts = new Map<
+  string,
+  { count: number; resetAt: number }
+>();
+const RESET_WINDOW_MS = 15 * 60 * 1000;
+const MAX_RESET_ATTEMPTS = 3;
+
+function resetCodeHash(email: string, code: string) {
+  return createHash("sha256")
+    .update(`${email}:${code}:${ENV.jwtSecret}`)
+    .digest("hex");
+}
+
+async function sendPasswordResetEmail(email: string, code: string) {
+  if (!ENV.resendApiKey) return false;
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${ENV.resendApiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: ENV.resetEmailFrom,
+      to: [email],
+      subject: "OpsFlow password reset code",
+      text: `Your OpsFlow password reset code is ${code}. It expires in 10 minutes.`,
+    }),
+  });
+  if (!response.ok) throw new Error("Password reset email delivery failed");
+  return true;
+}
 
 function loginAttemptKey(req: Request, email: string) {
   return `${req.ip}:${email}`;
@@ -200,24 +255,218 @@ compatibilityRouter.post("/auth/logout", async (req, res) => {
   return res.json({ success: true });
 });
 
+compatibilityRouter.post("/auth/forgot-password", async (req, res, next) => {
+  try {
+    const email = String(req.body.email ?? "")
+      .trim()
+      .toLowerCase();
+    if (!email) return res.status(400).json({ error: "Email is required" });
+    if (ENV.isProduction && !ENV.resendApiKey)
+      return res
+        .status(503)
+        .json({ error: "Password reset email is not configured" });
+
+    const attemptKey = `${req.ip}:${email}`;
+    const now = Date.now();
+    const attempt = resetAttempts.get(attemptKey);
+    if (attempt && attempt.resetAt > now && attempt.count >= MAX_RESET_ATTEMPTS)
+      return res
+        .status(429)
+        .json({ error: "Too many reset requests. Try again later." });
+    const activeAttempt =
+      attempt && attempt.resetAt > now
+        ? attempt
+        : { count: 0, resetAt: now + RESET_WINDOW_MS };
+    resetAttempts.set(attemptKey, {
+      count: activeAttempt.count + 1,
+      resetAt: activeAttempt.resetAt,
+    });
+
+    const user = await getUserByEmail(email);
+    let developmentCode: string | undefined;
+    if (user) {
+      const code = String(randomInt(100000, 1000000));
+      await createPasswordResetToken(
+        user.id,
+        resetCodeHash(email, code),
+        new Date(now + 10 * 60 * 1000),
+      );
+      if (ENV.isProduction) await sendPasswordResetEmail(email, code);
+      else developmentCode = code;
+    }
+    return res.json({
+      success: true,
+      message: "If an account exists, a reset code has been sent.",
+      developmentCode,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+compatibilityRouter.post("/auth/reset-password", async (req, res, next) => {
+  try {
+    const email = String(req.body.email ?? "")
+      .trim()
+      .toLowerCase();
+    const code = String(req.body.code ?? "").trim();
+    const password = String(req.body.password ?? "");
+    if (!email || !/^\d{6}$/.test(code))
+      return res.status(400).json({ error: "Enter a valid six-digit code" });
+    if (!isAcceptablePassword(password))
+      return res
+        .status(400)
+        .json({ error: "Password must be at least 8 characters" });
+    const attemptKey = `${req.ip}:${email}`;
+    const now = Date.now();
+    const attempt = resetVerificationAttempts.get(attemptKey);
+    if (attempt && attempt.resetAt > now && attempt.count >= 5)
+      return res
+        .status(429)
+        .json({ error: "Too many invalid attempts. Request a new code." });
+    const activeAttempt =
+      attempt && attempt.resetAt > now
+        ? attempt
+        : { count: 0, resetAt: now + RESET_WINDOW_MS };
+    const changed = await resetPasswordWithToken(
+      resetCodeHash(email, code),
+      await hashPassword(password),
+    );
+    if (!changed) {
+      resetVerificationAttempts.set(attemptKey, {
+        count: activeAttempt.count + 1,
+        resetAt: activeAttempt.resetAt,
+      });
+      return res
+        .status(400)
+        .json({ error: "The reset code is invalid or expired" });
+    }
+    resetAttempts.delete(attemptKey);
+    resetVerificationAttempts.delete(attemptKey);
+    return res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+compatibilityRouter.get("/notifications", async (req, res, next) => {
+  try {
+    const user = await authenticatedUser(req, res);
+    if (!user) return res.status(401).json({ error: "You must be logged in" });
+    const [notifications, unreadCount] = await Promise.all([
+      getNotificationsForUser(user.id),
+      getUnreadNotificationCount(user.id),
+    ]);
+    return res.json({ notifications, unreadCount });
+  } catch (error) {
+    next(error);
+  }
+});
+
+compatibilityRouter.patch("/notifications/:id/read", async (req, res, next) => {
+  try {
+    const user = await authenticatedUser(req, res);
+    if (!user) return res.status(401).json({ error: "You must be logged in" });
+    await markNotificationRead(Number(req.params.id), user.id);
+    return res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+compatibilityRouter.post("/notifications/read-all", async (req, res, next) => {
+  try {
+    const user = await authenticatedUser(req, res);
+    if (!user) return res.status(401).json({ error: "You must be logged in" });
+    await markAllNotificationsRead(user.id);
+    return res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+compatibilityRouter.post("/notifications/read-chat", async (req, res, next) => {
+  try {
+    const user = await authenticatedUser(req, res);
+    if (!user) return res.status(401).json({ error: "You must be logged in" });
+    const type = req.body.type === "proj" ? "proj" : "dm";
+    const targetId = Number(req.body.targetId);
+    if (!targetId)
+      return res.status(400).json({ error: "Chat target is required" });
+    await markChatNotificationsRead(user.id, type, targetId);
+    return res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
 compatibilityRouter.get("/workspace", async (req, res, next) => {
   try {
     const user = await authenticatedUser(req, res);
     if (!user) return res.status(401).json({ error: "You must be logged in" });
 
-    const [dbProjects, dbTasks, dbUsers] = await Promise.all([
-      user.role === "admin" ? getAllProjects() : getProjectsForUser(user.id),
-      user.role === "admin" ? getAllTasks() : getAllTasksForUser(user.id),
-      getAllUsers(),
+    const [dbProjects, dbTasks, directRooms] = await Promise.all([
+      isSuperAdmin(user.role) ? getAllProjects() : getProjectsForUser(user.id),
+      isSuperAdmin(user.role)
+        ? getAllTasks()
+        : getAllTasksForUser(
+            user.id,
+            user.role === "staff" ? { assigneeId: user.id } : undefined,
+          ),
+      getDirectRoomsForUser(user.id),
     ]);
+    const projectUsers = await getUsersForProjects(
+      dbProjects.map((project) => project.id),
+    );
+    const roleVisibleUsers = isSuperAdmin(user.role)
+      ? await getAllUsers()
+      : user.role === "admin"
+        ? [
+            ...new Map(
+              [...projectUsers, user].map((member) => [member.id, member]),
+            ).values(),
+          ]
+        : projectUsers;
+    // A direct-message participant must remain visible even when they do not
+    // share a project with the current user (for example, an Admin messaging Staff).
+    const dbUsers = roleVisibleUsers;
+    const contactUsers = [
+      ...new Map(
+        [...dbUsers, ...directRooms.map(({ otherUser }) => otherUser)].map(
+          (member) => [member.id, member],
+        ),
+      ).values(),
+    ];
     const usersById = new Map(dbUsers.map((member) => [member.id, member]));
     const projectTeams = new Map<number, string[]>();
+    const projectParticipants = new Map<
+      number,
+      Array<{
+        id: string;
+        name: string;
+        email: string;
+        systemRole: string;
+        projectRole: string;
+        isOwner: boolean;
+      }>
+    >();
     await Promise.all(
       dbProjects.map(async (project) => {
         const rows = await getProjectMembers(project.id);
         projectTeams.set(
           project.id,
           rows.map((row) => row.user.name ?? row.user.email ?? "Member"),
+        );
+        projectParticipants.set(
+          project.id,
+          rows.map((row) => ({
+            id: String(row.user.id),
+            name: row.user.name ?? row.user.email ?? "Member",
+            email: row.user.email ?? "",
+            systemRole: row.user.role,
+            projectRole: row.member.role,
+            isOwner: row.user.id === project.ownerId,
+          })),
         );
       }),
     );
@@ -243,6 +492,7 @@ compatibilityRouter.get("/workspace", async (req, res, next) => {
           : 0,
         color: project.color,
         team: projectTeams.get(project.id) ?? [],
+        participants: projectParticipants.get(project.id) ?? [],
       };
     });
 
@@ -253,6 +503,7 @@ compatibilityRouter.get("/workspace", async (req, res, next) => {
       assignedTo: task.assigneeId
         ? (usersById.get(task.assigneeId)?.name ?? "Unassigned")
         : "Unassigned",
+      assigneeId: task.assigneeId ? String(task.assigneeId) : null,
       priority:
         task.priority === "high" || task.priority === "urgent"
           ? "High"
@@ -267,7 +518,29 @@ compatibilityRouter.get("/workspace", async (req, res, next) => {
       id: String(member.id),
       name: member.name ?? member.email ?? "Member",
       email: member.email ?? "",
-      role: member.role === "admin" ? "Administrator" : "Staff",
+      role:
+        member.role === "super_admin"
+          ? "Super Admin"
+          : member.role === "admin"
+            ? "Administrator"
+            : "Staff",
+      department: "Operations",
+      status: "Active" as const,
+      since: member.createdAt.toLocaleString("en-US", {
+        month: "short",
+        year: "numeric",
+      }),
+    }));
+    const contacts = contactUsers.map((member) => ({
+      id: String(member.id),
+      name: member.name ?? member.email ?? "Member",
+      email: member.email ?? "",
+      role:
+        member.role === "super_admin"
+          ? "Super Admin"
+          : member.role === "admin"
+            ? "Administrator"
+            : "Staff",
       department: "Operations",
       status: "Active" as const,
       since: member.createdAt.toLocaleString("en-US", {
@@ -277,10 +550,7 @@ compatibilityRouter.get("/workspace", async (req, res, next) => {
     }));
 
     const projectIds = dbProjects.map((project) => project.id);
-    const [projectRooms, directRooms] = await Promise.all([
-      getProjectRooms(projectIds),
-      getDirectRoomsForUser(user.id),
-    ]);
+    const projectRooms = await getProjectRooms(projectIds);
     const projectChats = (
       await Promise.all(
         projectRooms.map(async (room) => {
@@ -305,6 +575,7 @@ compatibilityRouter.get("/workspace", async (req, res, next) => {
       projects,
       tasks,
       members,
+      contacts,
       chats: [...projectChats, ...directChats],
     });
   } catch (error) {
@@ -316,7 +587,7 @@ compatibilityRouter.post("/projects", async (req, res, next) => {
   try {
     const user = await authenticatedUser(req, res);
     if (!user) return res.status(401).json({ error: "You must be logged in" });
-    if (user.role !== "admin") {
+    if (!canCreateProject(user.role)) {
       return res.status(403).json({ error: "Administrator access required" });
     }
     if (!req.body.name)
@@ -343,6 +614,7 @@ compatibilityRouter.post("/projects", async (req, res, next) => {
       description: req.body.description,
       color: req.body.color,
       ownerId: user.id,
+      createdBy: user.id,
       startDate,
       endDate,
     });
@@ -356,12 +628,11 @@ compatibilityRouter.patch("/projects/:id", async (req, res, next) => {
   try {
     const user = await authenticatedUser(req, res);
     if (!user) return res.status(401).json({ error: "You must be logged in" });
-    if (user.role !== "admin") {
-      return res.status(403).json({ error: "Administrator access required" });
-    }
     const projectId = Number(req.params.id);
     const project = await getProjectById(projectId);
     if (!project) return res.status(404).json({ error: "Project not found" });
+    if (!canUpdateProject(user, project))
+      return res.status(403).json({ error: "Project owner access required" });
 
     const startDate = req.body.startDate
       ? new Date(String(req.body.startDate))
@@ -398,13 +669,13 @@ compatibilityRouter.delete("/projects/:id", async (req, res, next) => {
   try {
     const user = await authenticatedUser(req, res);
     if (!user) return res.status(401).json({ error: "You must be logged in" });
-    if (user.role !== "admin") {
-      return res.status(403).json({ error: "Administrator access required" });
-    }
     const projectId = Number(req.params.id);
-    if (!(await getProjectById(projectId))) {
+    const project = await getProjectById(projectId);
+    if (!project) {
       return res.status(404).json({ error: "Project not found" });
     }
+    if (!canDeleteProject(user, project))
+      return res.status(403).json({ error: "Project owner access required" });
     await deleteProject(projectId);
     return res.json({ success: true });
   } catch (error) {
@@ -421,13 +692,22 @@ compatibilityRouter.post("/tasks", async (req, res, next) => {
       return res
         .status(400)
         .json({ error: "Project and task name are required" });
-    if (user.role !== "admin" && !(await isProjectMember(projectId, user.id))) {
-      return res.status(403).json({ error: "Not a project member" });
-    }
+    const project = await getProjectById(projectId);
+    if (!project) return res.status(404).json({ error: "Project not found" });
+    const membership = await getProjectMember(projectId, user.id);
+    if (!canManageTasks(user, project, membership))
+      return res.status(403).json({ error: "Task manager access required" });
     const users = await getAllUsers();
-    const assignee = users.find(
-      (candidate) => candidate.name === req.body.assignedTo,
-    );
+    const requestedAssigneeId = Number(req.body.assigneeId);
+    const assignee = requestedAssigneeId
+      ? users.find((candidate) => candidate.id === requestedAssigneeId)
+      : users.find((candidate) => candidate.name === req.body.assignedTo);
+    if (!assignee)
+      return res.status(400).json({ error: "Select a valid assignee" });
+    if (!(await getProjectMember(projectId, assignee.id)))
+      return res
+        .status(400)
+        .json({ error: "Assignee must be a project member" });
     const task = await createTask({
       projectId,
       title: req.body.name,
@@ -440,6 +720,16 @@ compatibilityRouter.post("/tasks", async (req, res, next) => {
             ? "low"
             : "medium",
     });
+    if (assignee && assignee.id !== user.id) {
+      await createNotification({
+        userId: assignee.id,
+        type: "task_assigned",
+        title: `Task assigned to you: "${task.title}"`,
+        relatedTaskId: task.id,
+        relatedProjectId: projectId,
+        actorId: user.id,
+      });
+    }
     return res.status(201).json({ success: true, task });
   } catch (error) {
     next(error);
@@ -452,34 +742,72 @@ compatibilityRouter.patch("/tasks/:id", async (req, res, next) => {
     if (!user) return res.status(401).json({ error: "You must be logged in" });
     const task = await getTaskById(Number(req.params.id));
     if (!task) return res.status(404).json({ error: "Task not found" });
-    if (
-      user.role !== "admin" &&
-      !(await isProjectMember(task.projectId, user.id))
-    ) {
+    const project = await getProjectById(task.projectId);
+    if (!project) return res.status(404).json({ error: "Project not found" });
+    const membership = await getProjectMember(task.projectId, user.id);
+    if (!canViewProject(user, project, membership))
       return res.status(403).json({ error: "Not a project member" });
-    }
+    const mayManage = canManageTasks(user, project, membership);
     const isStatusOnly =
       Object.keys(req.body).every((key) => key === "status") && req.body.status;
-    if (user.role !== "admin" && !isStatusOnly) {
+    if (!mayManage && (!isStatusOnly || task.assigneeId !== user.id)) {
       return res.status(403).json({ error: "Administrator access required" });
     }
     const update: Parameters<typeof updateTask>[1] = {};
     if (req.body.status) update.status = dbTaskStatus(req.body.status);
-    if (user.role === "admin") {
+    if (mayManage) {
       if (req.body.name !== undefined) update.title = String(req.body.name);
       if (req.body.priority !== undefined) {
         const priority = String(req.body.priority).toLowerCase();
         update.priority =
           priority === "high" ? "high" : priority === "low" ? "low" : "medium";
       }
-      if (req.body.assignedTo !== undefined) {
-        const assignee = (await getAllUsers()).find(
-          (candidate) => candidate.name === req.body.assignedTo,
-        );
+      if (
+        req.body.assigneeId !== undefined ||
+        req.body.assignedTo !== undefined
+      ) {
+        const users = await getAllUsers();
+        const requestedId = Number(req.body.assigneeId);
+        const assignee = requestedId
+          ? users.find((candidate) => candidate.id === requestedId)
+          : users.find((candidate) => candidate.name === req.body.assignedTo);
+        if (assignee && !(await getProjectMember(task.projectId, assignee.id)))
+          return res
+            .status(400)
+            .json({ error: "Assignee must be a project member" });
         update.assigneeId = assignee?.id ?? null;
       }
     }
     await updateTask(task.id, update);
+    if (
+      update.assigneeId &&
+      update.assigneeId !== task.assigneeId &&
+      update.assigneeId !== user.id
+    ) {
+      await createNotification({
+        userId: update.assigneeId,
+        type: "task_assigned",
+        title: `Task assigned to you: "${update.title ?? task.title}"`,
+        relatedTaskId: task.id,
+        relatedProjectId: task.projectId,
+        actorId: user.id,
+      });
+    }
+    if (
+      update.status &&
+      update.status !== task.status &&
+      task.assigneeId &&
+      task.assigneeId !== user.id
+    ) {
+      await createNotification({
+        userId: task.assigneeId,
+        type: "task_status_changed",
+        title: `Task "${task.title}" status changed`,
+        relatedTaskId: task.id,
+        relatedProjectId: task.projectId,
+        actorId: user.id,
+      });
+    }
     return res.json({ success: true });
   } catch (error) {
     next(error);
@@ -490,13 +818,17 @@ compatibilityRouter.delete("/tasks/:id", async (req, res, next) => {
   try {
     const user = await authenticatedUser(req, res);
     if (!user) return res.status(401).json({ error: "You must be logged in" });
-    if (user.role !== "admin") {
-      return res.status(403).json({ error: "Administrator access required" });
-    }
     const taskId = Number(req.params.id);
-    if (!(await getTaskById(taskId))) {
+    const task = await getTaskById(taskId);
+    if (!task) {
       return res.status(404).json({ error: "Task not found" });
     }
+    const project = await getProjectById(task.projectId);
+    const membership = project
+      ? await getProjectMember(task.projectId, user.id)
+      : undefined;
+    if (!project || !canManageTasks(user, project, membership))
+      return res.status(403).json({ error: "Task manager access required" });
     await deleteTask(taskId);
     return res.json({ success: true });
   } catch (error) {
@@ -508,7 +840,7 @@ compatibilityRouter.post("/members", async (req, res, next) => {
   try {
     const user = await authenticatedUser(req, res);
     if (!user) return res.status(401).json({ error: "You must be logged in" });
-    if (user.role !== "admin") {
+    if (!canCreateProject(user.role)) {
       return res.status(403).json({ error: "Administrator access required" });
     }
     if (!req.body.email)
@@ -525,8 +857,33 @@ compatibilityRouter.post("/members", async (req, res, next) => {
       member = await getUserByEmail(email);
     }
     if (!member) throw new Error("Failed to create member");
-    if (req.body.projectId)
-      await addProjectMember(Number(req.body.projectId), member.id);
+    if (req.body.systemRole === "admin") {
+      if (!isSuperAdmin(user.role))
+        return res.status(403).json({ error: "Super Admin access required" });
+      await updateUserRole(member.id, "admin");
+      member = await getUserByEmail(email);
+      if (!member) throw new Error("Failed to promote administrator");
+    }
+    if (req.body.projectId) {
+      const project = await getProjectById(Number(req.body.projectId));
+      if (!project) return res.status(404).json({ error: "Project not found" });
+      if (!canManageMembers(user, project))
+        return res.status(403).json({ error: "Project owner access required" });
+      if (!isSuperAdmin(user.role) && member.role !== "staff")
+        return res
+          .status(403)
+          .json({ error: "Admins may add Staff users only" });
+      await addProjectMember(project.id, member.id);
+      if (member.id !== user.id) {
+        await createNotification({
+          userId: member.id,
+          type: "project_added",
+          title: `Added to project "${project.name}"`,
+          relatedProjectId: project.id,
+          actorId: user.id,
+        });
+      }
+    }
     return res.status(201).json({ success: true, member });
   } catch (error) {
     next(error);
@@ -544,14 +901,25 @@ compatibilityRouter.post("/projects/:id/team", async (req, res, next) => {
         .json({ error: "Project and member name are required" });
     const project = await getProjectById(projectId);
     if (!project) return res.status(404).json({ error: "Project not found" });
-    if (user.role !== "admin" && project.ownerId !== user.id) {
+    if (!canManageMembers(user, project)) {
       return res.status(403).json({ error: "Project owner access required" });
     }
     const member = (await getAllUsers()).find(
       (candidate) => candidate.name === req.body.name,
     );
     if (!member) return res.status(404).json({ error: "Member not found" });
+    if (!isSuperAdmin(user.role) && member.role !== "staff")
+      return res.status(403).json({ error: "Admins may add Staff users only" });
     await addProjectMember(projectId, member.id);
+    if (member.id !== user.id) {
+      await createNotification({
+        userId: member.id,
+        type: "project_added",
+        title: `Added to project "${project.name}"`,
+        relatedProjectId: project.id,
+        actorId: user.id,
+      });
+    }
     return res.json({ success: true });
   } catch (error) {
     next(error);
@@ -572,7 +940,7 @@ compatibilityRouter.post("/chat/message", async (req, res, next) => {
       room = await getOrCreateDirectRoom(user.id, targetId);
     } else {
       if (
-        user.role !== "admin" &&
+        !isSuperAdmin(user.role) &&
         !(await isProjectMember(targetId, user.id))
       ) {
         return res.status(403).json({ error: "Not a project member" });
@@ -584,6 +952,34 @@ compatibilityRouter.post("/chat/message", async (req, res, next) => {
       senderId: user.id,
       content: text,
     });
+    const senderName = user.name ?? user.email ?? "Member";
+    if (req.body.type === "dm") {
+      if (targetId !== user.id) {
+        await createNotification({
+          userId: targetId,
+          type: "message_received",
+          title: `New message from ${senderName}`,
+          body: text.length > 120 ? `${text.slice(0, 117)}...` : text,
+          actorId: user.id,
+        });
+      }
+    } else {
+      const recipients = await getProjectMembers(targetId);
+      await Promise.all(
+        recipients
+          .filter(({ user: member }) => member.id !== user.id)
+          .map(({ user: member }) =>
+            createNotification({
+              userId: member.id,
+              type: "message_received",
+              title: `New message from ${senderName}`,
+              body: text.length > 120 ? `${text.slice(0, 117)}...` : text,
+              relatedProjectId: targetId,
+              actorId: user.id,
+            }),
+          ),
+      );
+    }
     return res.status(201).json({ success: true, message });
   } catch (error) {
     next(error);
@@ -604,11 +1000,29 @@ compatibilityRouter.post("/ai/ask", async (req, res, next) => {
         .status(503)
         .json({ error: "GEMINI_API_KEY is not configured" });
 
-    const [projects, tasks, users] = await Promise.all([
-      user.role === "admin" ? getAllProjects() : getProjectsForUser(user.id),
-      user.role === "admin" ? getAllTasks() : getAllTasksForUser(user.id),
-      getAllUsers(),
+    const [projects, tasks] = await Promise.all([
+      isSuperAdmin(user.role) ? getAllProjects() : getProjectsForUser(user.id),
+      isSuperAdmin(user.role)
+        ? getAllTasks()
+        : getAllTasksForUser(
+            user.id,
+            user.role === "staff" ? { assigneeId: user.id } : undefined,
+          ),
     ]);
+    const projectUsers = await getUsersForProjects(
+      projects.map((project) => project.id),
+    );
+    const users = isSuperAdmin(user.role)
+      ? await getAllUsers()
+      : user.role === "admin"
+        ? [
+            ...new Map(
+              [...(await getStaffUsers()), ...projectUsers, user].map(
+                (member) => [member.id, member],
+              ),
+            ).values(),
+          ]
+        : projectUsers;
     const aiUsers = users.map((member) => ({
       id: member.id,
       name: member.name ?? "Member",

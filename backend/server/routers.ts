@@ -7,6 +7,8 @@ import { systemRouter } from "./_core/systemRouter";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import {
   addProjectMember,
+  changeProjectOwner,
+  createAuditLog,
   createActivity,
   createNotification,
   createProject,
@@ -15,14 +17,17 @@ import {
   deleteTask,
   getAllProjects,
   getAllUsers,
+  getStaffUsers,
   getDashboardStats,
   getDirectRoomsForUser,
   getGlobalRoom,
   getUserByEmail,
+  getUserById,
   getMessages,
   getNotificationsForUser,
   getOrCreateDirectRoom,
   getProjectById,
+  getProjectMember,
   getProjectMembers,
   getProjectsForUser,
   getRecentActivities,
@@ -42,10 +47,20 @@ import {
   upsertUser,
 } from "./db";
 import { isAcceptablePassword, toPublicUser } from "./security";
+import {
+  canCreateProject,
+  canDeleteProject,
+  canManageMembers,
+  canManageTasks,
+  canUpdateProject,
+  canUpdateTaskStatus,
+  canViewProject,
+  isSuperAdmin,
+} from "./permissions";
 
 // â”€â”€â”€ Admin guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
-  if (ctx.user.role !== "admin")
+  if (!canCreateProject(ctx.user.role))
     throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
   return next({ ctx });
 });
@@ -54,11 +69,12 @@ const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
 async function assertProjectAccess(
   projectId: number,
   userId: number,
-  userRole: string,
+  userRole: "staff" | "admin" | "super_admin",
 ) {
-  if (userRole === "admin") return;
-  const ok = await isProjectMember(projectId, userId);
-  if (!ok)
+  const project = await getProjectById(projectId);
+  if (!project) throw new TRPCError({ code: "NOT_FOUND" });
+  const membership = await getProjectMember(projectId, userId);
+  if (!canViewProject({ id: userId, role: userRole }, project, membership))
     throw new TRPCError({ code: "FORBIDDEN", message: "Not a project member" });
 }
 
@@ -153,13 +169,35 @@ export const appRouter = router({
 
   // â”€â”€â”€ Users â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   users: router({
-    list: protectedProcedure.query(async () => {
+    list: protectedProcedure.query(async ({ ctx }) => {
+      if (!isSuperAdmin(ctx.user.role))
+        throw new TRPCError({ code: "FORBIDDEN", message: "Super Admin only" });
       return (await getAllUsers()).map(toPublicUser);
     }),
-    updateRole: adminProcedure
-      .input(z.object({ userId: z.number(), role: z.enum(["user", "admin"]) }))
-      .mutation(async ({ input }) => {
+    availableStaff: adminProcedure.query(async () => {
+      return (await getStaffUsers()).map(toPublicUser);
+    }),
+    updateRole: protectedProcedure
+      .input(
+        z.object({
+          userId: z.number(),
+          role: z.enum(["staff", "admin", "super_admin"]),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        if (!isSuperAdmin(ctx.user.role))
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "Super Admin only",
+          });
         await updateUserRole(input.userId, input.role);
+        await createAuditLog({
+          actorId: ctx.user.id,
+          action: "user_role_changed",
+          entityType: "user",
+          entityId: input.userId,
+          metadata: { role: input.role },
+        });
         return { success: true };
       }),
   }),
@@ -167,7 +205,7 @@ export const appRouter = router({
   // â”€â”€â”€ Projects â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   projects: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role === "admin") return getAllProjects();
+      if (isSuperAdmin(ctx.user.role)) return getAllProjects();
       return getProjectsForUser(ctx.user.id);
     }),
     getById: protectedProcedure
@@ -203,6 +241,7 @@ export const appRouter = router({
           description: input.description,
           color: input.color ?? "#6366f1",
           ownerId: ctx.user.id,
+          createdBy: ctx.user.id,
           startDate: input.startDate,
           endDate: input.endDate,
         });
@@ -228,7 +267,7 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         const project = await getProjectById(input.id);
         if (!project) throw new TRPCError({ code: "NOT_FOUND" });
-        if (ctx.user.role !== "admin" && project.ownerId !== ctx.user.id)
+        if (!canUpdateProject(ctx.user, project))
           throw new TRPCError({ code: "FORBIDDEN" });
         const { id, ...data } = input;
         await updateProject(id, data);
@@ -239,9 +278,16 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         const project = await getProjectById(input.id);
         if (!project) throw new TRPCError({ code: "NOT_FOUND" });
-        if (ctx.user.role !== "admin" && project.ownerId !== ctx.user.id)
+        if (!canDeleteProject(ctx.user, project))
           throw new TRPCError({ code: "FORBIDDEN" });
         await deleteProject(input.id);
+        await createAuditLog({
+          actorId: ctx.user.id,
+          action: "project_deleted",
+          entityType: "project",
+          entityId: input.id,
+          metadata: { name: project.name },
+        });
         return { success: true };
       }),
     getMembers: protectedProcedure
@@ -261,13 +307,28 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         const project = await getProjectById(input.projectId);
         if (!project) throw new TRPCError({ code: "NOT_FOUND" });
-        if (ctx.user.role !== "admin" && project.ownerId !== ctx.user.id)
+        if (!canManageMembers(ctx.user, project))
           throw new TRPCError({ code: "FORBIDDEN" });
+        const target = await getUserById(input.userId);
+        if (!target)
+          throw new TRPCError({ code: "NOT_FOUND", message: "User not found" });
+        if (!isSuperAdmin(ctx.user.role) && target.role !== "staff")
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "Admins may add Staff users only",
+          });
         await addProjectMember(
           input.projectId,
           input.userId,
           input.role ?? "member",
         );
+        await createAuditLog({
+          actorId: ctx.user.id,
+          action: "project_member_added",
+          entityType: "project",
+          entityId: input.projectId,
+          metadata: { userId: input.userId, role: input.role ?? "member" },
+        });
         await createNotification({
           userId: input.userId,
           type: "project_added",
@@ -283,9 +344,44 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         const project = await getProjectById(input.projectId);
         if (!project) throw new TRPCError({ code: "NOT_FOUND" });
-        if (ctx.user.role !== "admin" && project.ownerId !== ctx.user.id)
+        if (!canManageMembers(ctx.user, project))
           throw new TRPCError({ code: "FORBIDDEN" });
+        if (project.ownerId === input.userId)
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Transfer ownership before removing the owner",
+          });
         await removeProjectMember(input.projectId, input.userId);
+        await createAuditLog({
+          actorId: ctx.user.id,
+          action: "project_member_removed",
+          entityType: "project",
+          entityId: input.projectId,
+          metadata: { userId: input.userId },
+        });
+        return { success: true };
+      }),
+    changeOwner: protectedProcedure
+      .input(z.object({ projectId: z.number(), ownerId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        if (!isSuperAdmin(ctx.user.role))
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "Super Admin only",
+          });
+        const project = await getProjectById(input.projectId);
+        if (!project) throw new TRPCError({ code: "NOT_FOUND" });
+        await changeProjectOwner(input.projectId, input.ownerId);
+        await createAuditLog({
+          actorId: ctx.user.id,
+          action: "project_owner_changed",
+          entityType: "project",
+          entityId: input.projectId,
+          metadata: {
+            previousOwnerId: project.ownerId,
+            ownerId: input.ownerId,
+          },
+        });
         return { success: true };
       }),
   }),
@@ -311,9 +407,17 @@ export const appRouter = router({
             ctx.user.id,
             ctx.user.role,
           );
-          return getTasksForProject(input.projectId, input);
+          return getTasksForProject(input.projectId, {
+            ...input,
+            assigneeId:
+              ctx.user.role === "staff" ? ctx.user.id : input.assigneeId,
+          });
         }
-        return getAllTasksForUser(ctx.user.id, input);
+        return getAllTasksForUser(ctx.user.id, {
+          ...input,
+          assigneeId:
+            ctx.user.role === "staff" ? ctx.user.id : input?.assigneeId,
+        });
       }),
     getById: protectedProcedure
       .input(z.object({ id: z.number() }))
@@ -321,6 +425,8 @@ export const appRouter = router({
         const task = await getTaskById(input.id);
         if (!task) throw new TRPCError({ code: "NOT_FOUND" });
         await assertProjectAccess(task.projectId, ctx.user.id, ctx.user.role);
+        if (ctx.user.role === "staff" && task.assigneeId !== ctx.user.id)
+          throw new TRPCError({ code: "FORBIDDEN" });
         return task;
       }),
     create: protectedProcedure
@@ -336,7 +442,14 @@ export const appRouter = router({
         }),
       )
       .mutation(async ({ ctx, input }) => {
-        await assertProjectAccess(input.projectId, ctx.user.id, ctx.user.role);
+        const project = await getProjectById(input.projectId);
+        if (!project) throw new TRPCError({ code: "NOT_FOUND" });
+        const membership = await getProjectMember(input.projectId, ctx.user.id);
+        if (!canManageTasks(ctx.user, project, membership))
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "Task manager access required",
+          });
         const task = await createTask({
           title: input.title,
           description: input.description,
@@ -386,6 +499,23 @@ export const appRouter = router({
         const task = await getTaskById(input.id);
         if (!task) throw new TRPCError({ code: "NOT_FOUND" });
         await assertProjectAccess(task.projectId, ctx.user.id, ctx.user.role);
+        const project = await getProjectById(task.projectId);
+        if (!project) throw new TRPCError({ code: "NOT_FOUND" });
+        const membership = await getProjectMember(task.projectId, ctx.user.id);
+        const mayManage = canManageTasks(ctx.user, project, membership);
+        if (!mayManage) {
+          const keys = Object.keys(input).filter((key) => key !== "id");
+          if (
+            keys.some((key) => key !== "status") ||
+            !input.status ||
+            !canUpdateTaskStatus(ctx.user, task, false)
+          )
+            throw new TRPCError({
+              code: "FORBIDDEN",
+              message:
+                "You may only update the status of tasks assigned to you",
+            });
+        }
         const { id, startDate, dueDate, assigneeId, ...rest } = input;
         const updateData: any = { ...rest };
         if (startDate !== undefined)
@@ -451,7 +581,14 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         const task = await getTaskById(input.id);
         if (!task) throw new TRPCError({ code: "NOT_FOUND" });
-        await assertProjectAccess(task.projectId, ctx.user.id, ctx.user.role);
+        const project = await getProjectById(task.projectId);
+        if (!project) throw new TRPCError({ code: "NOT_FOUND" });
+        const membership = await getProjectMember(task.projectId, ctx.user.id);
+        if (!canManageTasks(ctx.user, project, membership))
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "Task manager access required",
+          });
         await deleteTask(input.id);
         await createActivity({
           userId: ctx.user.id,
@@ -517,7 +654,7 @@ export const appRouter = router({
   // â”€â”€â”€ Dashboard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   dashboard: router({
     stats: protectedProcedure.query(async ({ ctx }) => {
-      return getDashboardStats(ctx.user.id);
+      return getDashboardStats(ctx.user.id, ctx.user.role);
     }),
     recentActivity: protectedProcedure.query(async ({ ctx }) => {
       return getRecentActivities(ctx.user.id, 20);

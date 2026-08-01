@@ -1,6 +1,8 @@
 import {
   boolean,
+  index,
   integer,
+  jsonb,
   pgEnum,
   pgTable,
   serial,
@@ -10,7 +12,11 @@ import {
   varchar,
 } from "drizzle-orm/pg-core";
 
-export const userRoleEnum = pgEnum("user_role", ["user", "admin"]);
+export const userRoleEnum = pgEnum("user_role", [
+  "staff",
+  "admin",
+  "super_admin",
+]);
 export const projectMemberRoleEnum = pgEnum("project_member_role", [
   "viewer",
   "member",
@@ -52,7 +58,7 @@ export const users = pgTable("users", {
   avatarUrl: text("avatarUrl"),
   loginMethod: varchar("loginMethod", { length: 64 }),
   passwordHash: varchar("passwordHash", { length: 255 }),
-  role: userRoleEnum("role").default("user").notNull(),
+  role: userRoleEnum("role").default("staff").notNull(),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
   lastSignedIn: timestamp("lastSignedIn", { withTimezone: true })
@@ -63,18 +69,42 @@ export const users = pgTable("users", {
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
 
+export const passwordResetTokens = pgTable(
+  "password_reset_tokens",
+  {
+    id: serial("id").primaryKey(),
+    userId: integer("userId")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    tokenHash: varchar("tokenHash", { length: 64 }).notNull().unique(),
+    expiresAt: timestamp("expiresAt", { withTimezone: true }).notNull(),
+    usedAt: timestamp("usedAt", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (table) => [index("password_reset_tokens_user_id_idx").on(table.userId)],
+);
+
 // Projects
-export const projects = pgTable("projects", {
-  id: serial("id").primaryKey(),
-  name: varchar("name", { length: 255 }).notNull(),
-  description: text("description"),
-  color: varchar("color", { length: 32 }).notNull().default("#6366f1"),
-  ownerId: integer("ownerId").notNull(),
-  startDate: timestamp("startDate", { withTimezone: true }),
-  endDate: timestamp("endDate", { withTimezone: true }),
-  createdAt: createdAt(),
-  updatedAt: updatedAt(),
-});
+export const projects = pgTable(
+  "projects",
+  {
+    id: serial("id").primaryKey(),
+    name: varchar("name", { length: 255 }).notNull(),
+    description: text("description"),
+    color: varchar("color", { length: 32 }).notNull().default("#6366f1"),
+    ownerId: integer("ownerId")
+      .notNull()
+      .references(() => users.id),
+    createdBy: integer("createdBy")
+      .notNull()
+      .references(() => users.id),
+    startDate: timestamp("startDate", { withTimezone: true }),
+    endDate: timestamp("endDate", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [index("projects_owner_id_idx").on(table.ownerId)],
+);
 
 export type Project = typeof projects.$inferSelect;
 export type InsertProject = typeof projects.$inferInsert;
@@ -84,8 +114,12 @@ export const projectMembers = pgTable(
   "project_members",
   {
     id: serial("id").primaryKey(),
-    projectId: integer("projectId").notNull(),
-    userId: integer("userId").notNull(),
+    projectId: integer("projectId")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    userId: integer("userId")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
     role: projectMemberRoleEnum("role").notNull().default("member"),
     joinedAt: timestamp("joinedAt", { withTimezone: true })
       .defaultNow()
@@ -96,6 +130,8 @@ export const projectMembers = pgTable(
       table.projectId,
       table.userId,
     ),
+    index("project_members_user_id_idx").on(table.userId),
+    index("project_members_project_id_idx").on(table.projectId),
   ],
 );
 
@@ -103,21 +139,32 @@ export type ProjectMember = typeof projectMembers.$inferSelect;
 export type InsertProjectMember = typeof projectMembers.$inferInsert;
 
 // Tasks
-export const tasks = pgTable("tasks", {
-  id: serial("id").primaryKey(),
-  title: varchar("title", { length: 512 }).notNull(),
-  description: text("description"),
-  status: taskStatusEnum("status").notNull().default("pending"),
-  priority: taskPriorityEnum("priority").notNull().default("medium"),
-  projectId: integer("projectId").notNull(),
-  assigneeId: integer("assigneeId"),
-  creatorId: integer("creatorId").notNull(),
-  startDate: timestamp("startDate", { withTimezone: true }),
-  dueDate: timestamp("dueDate", { withTimezone: true }),
-  completedAt: timestamp("completedAt", { withTimezone: true }),
-  createdAt: createdAt(),
-  updatedAt: updatedAt(),
-});
+export const tasks = pgTable(
+  "tasks",
+  {
+    id: serial("id").primaryKey(),
+    title: varchar("title", { length: 512 }).notNull(),
+    description: text("description"),
+    status: taskStatusEnum("status").notNull().default("pending"),
+    priority: taskPriorityEnum("priority").notNull().default("medium"),
+    projectId: integer("projectId")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    assigneeId: integer("assigneeId").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    creatorId: integer("creatorId").notNull(),
+    startDate: timestamp("startDate", { withTimezone: true }),
+    dueDate: timestamp("dueDate", { withTimezone: true }),
+    completedAt: timestamp("completedAt", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    index("tasks_project_id_idx").on(table.projectId),
+    index("tasks_assignee_id_idx").on(table.assigneeId),
+  ],
+);
 
 export type Task = typeof tasks.$inferSelect;
 export type InsertTask = typeof tasks.$inferInsert;
@@ -190,3 +237,24 @@ export const activities = pgTable("activities", {
 
 export type Activity = typeof activities.$inferSelect;
 export type InsertActivity = typeof activities.$inferInsert;
+
+// Immutable security-relevant events. Metadata stores a small JSON snapshot
+// such as the old/new role or the affected member id.
+export const auditLogs = pgTable(
+  "audit_logs",
+  {
+    id: serial("id").primaryKey(),
+    actorId: integer("actorId").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    action: varchar("action", { length: 64 }).notNull(),
+    entityType: varchar("entityType", { length: 64 }).notNull(),
+    entityId: integer("entityId"),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+    createdAt: createdAt(),
+  },
+  (table) => [index("audit_logs_actor_id_idx").on(table.actorId)],
+);
+
+export type AuditLog = typeof auditLogs.$inferSelect;
+export type InsertAuditLog = typeof auditLogs.$inferInsert;

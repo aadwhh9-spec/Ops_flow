@@ -22,6 +22,10 @@ export const ENV = {
 
   port: Number(process.env.PORT ?? 4000),
 
+  resendApiKey: process.env.RESEND_API_KEY ?? "",
+  resetEmailFrom:
+    process.env.RESET_EMAIL_FROM ?? "OpsFlow <onboarding@resend.dev>",
+
   isProduction: process.env.NODE_ENV === "production",
 };
 

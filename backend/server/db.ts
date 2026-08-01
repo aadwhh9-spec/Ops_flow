@@ -1,11 +1,14 @@
 ﻿import { and, desc, eq, inArray, like, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
+import { gt, isNull } from "drizzle-orm";
 import postgres from "postgres";
 import {
   activities,
+  auditLogs,
   chatRoomMembers,
   chatRooms,
   InsertActivity,
+  InsertAuditLog,
   InsertMessage,
   InsertNotification,
   InsertProject,
@@ -13,6 +16,7 @@ import {
   InsertUser,
   messages,
   notifications,
+  passwordResetTokens,
   projectMembers,
   projects,
   tasks,
@@ -64,8 +68,8 @@ export async function upsertUser(user: InsertUser): Promise<void> {
     values.role = user.role;
     updateSet.role = user.role;
   } else if (user.openId === ENV.ownerOpenId) {
-    values.role = "admin";
-    updateSet.role = "admin";
+    values.role = "super_admin";
+    updateSet.role = "super_admin";
   }
 
   if (!values.lastSignedIn) values.lastSignedIn = new Date();
@@ -98,16 +102,101 @@ export async function getUserByEmail(email: string) {
   return result[0];
 }
 
+export async function getUserById(id: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const [user] = await db.select().from(users).where(eq(users.id, id)).limit(1);
+  return user;
+}
+
 export async function getAllUsers() {
   const db = await getDb();
   if (!db) return [];
   return db.select().from(users).orderBy(users.name);
 }
 
-export async function updateUserRole(userId: number, role: "user" | "admin") {
+export async function getStaffUsers() {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select()
+    .from(users)
+    .where(eq(users.role, "staff"))
+    .orderBy(users.name);
+}
+
+export async function getUsersForProjects(projectIds: number[]) {
+  const db = await getDb();
+  if (!db || projectIds.length === 0) return [];
+  return db
+    .selectDistinct({ user: users })
+    .from(projectMembers)
+    .innerJoin(users, eq(projectMembers.userId, users.id))
+    .where(inArray(projectMembers.projectId, projectIds))
+    .then((rows) => rows.map((row) => row.user));
+}
+
+export async function updateUserRole(
+  userId: number,
+  role: "staff" | "admin" | "super_admin",
+) {
   const db = await getDb();
   if (!db) return;
   await db.update(users).set({ role }).where(eq(users.id, userId));
+}
+
+export async function createPasswordResetToken(
+  userId: number,
+  tokenHash: string,
+  expiresAt: Date,
+) {
+  const db = await getDb();
+  if (!db) return;
+  await db.transaction(async (tx) => {
+    await tx
+      .update(passwordResetTokens)
+      .set({ usedAt: new Date() })
+      .where(
+        and(
+          eq(passwordResetTokens.userId, userId),
+          isNull(passwordResetTokens.usedAt),
+        ),
+      );
+    await tx
+      .insert(passwordResetTokens)
+      .values({ userId, tokenHash, expiresAt });
+  });
+}
+
+export async function resetPasswordWithToken(
+  tokenHash: string,
+  passwordHash: string,
+) {
+  const db = await getDb();
+  if (!db) return false;
+  return db.transaction(async (tx) => {
+    const [token] = await tx
+      .select()
+      .from(passwordResetTokens)
+      .where(
+        and(
+          eq(passwordResetTokens.tokenHash, tokenHash),
+          isNull(passwordResetTokens.usedAt),
+          gt(passwordResetTokens.expiresAt, new Date()),
+        ),
+      )
+      .limit(1);
+    if (!token) return false;
+    await tx
+      .update(users)
+      .set({ passwordHash, updatedAt: new Date() })
+      .where(eq(users.id, token.userId));
+    await tx
+      .update(passwordResetTokens)
+      .set({ usedAt: new Date() })
+      .where(eq(passwordResetTokens.id, token.id));
+    return true;
+  });
 }
 
 // â”€â”€â”€ Projects â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -214,6 +303,22 @@ export async function getProjectMembers(projectId: number) {
   return rows;
 }
 
+export async function getProjectMember(projectId: number, userId: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const [membership] = await db
+    .select()
+    .from(projectMembers)
+    .where(
+      and(
+        eq(projectMembers.projectId, projectId),
+        eq(projectMembers.userId, userId),
+      ),
+    )
+    .limit(1);
+  return membership;
+}
+
 export async function addProjectMember(
   projectId: number,
   userId: number,
@@ -251,6 +356,30 @@ export async function isProjectMember(
   if (!db) return false;
   const ids = await getAccessibleProjectIds(userId);
   return ids.includes(projectId);
+}
+
+export async function createAuditLog(data: InsertAuditLog) {
+  const db = await getDb();
+  if (!db) return;
+  await db.insert(auditLogs).values(data);
+}
+
+export async function changeProjectOwner(projectId: number, ownerId: number) {
+  const db = await getDb();
+  if (!db) return;
+  await db.transaction(async (tx) => {
+    await tx
+      .update(projects)
+      .set({ ownerId, updatedAt: new Date() })
+      .where(eq(projects.id, projectId));
+    await tx
+      .insert(projectMembers)
+      .values({ projectId, userId: ownerId, role: "manager" })
+      .onConflictDoUpdate({
+        target: [projectMembers.projectId, projectMembers.userId],
+        set: { role: "manager" },
+      });
+  });
 }
 
 // â”€â”€â”€ Tasks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -312,6 +441,7 @@ export async function getAllTasksForUser(
     priority?: string;
     search?: string;
     projectId?: number;
+    assigneeId?: number;
   },
 ) {
   const db = await getDb();
@@ -326,6 +456,8 @@ export async function getAllTasksForUser(
     conditions.push(like(tasks.title, `%${filters.search}%`));
   if (filters?.projectId)
     conditions.push(eq(tasks.projectId, filters.projectId));
+  if (filters?.assigneeId)
+    conditions.push(eq(tasks.assigneeId, filters.assigneeId));
   return db
     .select()
     .from(tasks)
@@ -593,6 +725,29 @@ export async function markAllNotificationsRead(userId: number) {
     .where(eq(notifications.userId, userId));
 }
 
+export async function markChatNotificationsRead(
+  userId: number,
+  type: "proj" | "dm",
+  targetId: number,
+) {
+  const db = await getDb();
+  if (!db) return;
+  const targetCondition =
+    type === "proj"
+      ? eq(notifications.relatedProjectId, targetId)
+      : eq(notifications.actorId, targetId);
+  await db
+    .update(notifications)
+    .set({ isRead: true })
+    .where(
+      and(
+        eq(notifications.userId, userId),
+        eq(notifications.type, "message_received"),
+        targetCondition,
+      ),
+    );
+}
+
 export async function getUnreadNotificationCount(userId: number) {
   const db = await getDb();
   if (!db) return 0;
@@ -639,7 +794,10 @@ export async function getRecentActivities(userId: number, limit = 20) {
 }
 
 // â”€â”€â”€ Dashboard Stats â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-export async function getDashboardStats(userId: number) {
+export async function getDashboardStats(
+  userId: number,
+  role: "staff" | "admin" | "super_admin",
+) {
   const db = await getDb();
   if (!db)
     return {
@@ -648,11 +806,12 @@ export async function getDashboardStats(userId: number) {
       projectCount: 0,
       pendingApproval: 0,
     };
-  const memberRows = await db
-    .select({ projectId: projectMembers.projectId })
-    .from(projectMembers)
-    .where(eq(projectMembers.userId, userId));
-  const projectIds = memberRows.map((r) => r.projectId);
+  const projectIds =
+    role === "super_admin"
+      ? (await db.select({ projectId: projects.id }).from(projects)).map(
+          (row) => row.projectId,
+        )
+      : await getAccessibleProjectIds(userId);
   if (projectIds.length === 0)
     return {
       activeTasks: 0,
@@ -661,20 +820,22 @@ export async function getDashboardStats(userId: number) {
       pendingApproval: 0,
     };
 
+  const taskScope =
+    role === "staff"
+      ? and(inArray(tasks.projectId, projectIds), eq(tasks.assigneeId, userId))
+      : inArray(tasks.projectId, projectIds);
   const [activeResult] = await db
     .select({ count: sql<number>`count(*)` })
     .from(tasks)
-    .where(and(inArray(tasks.projectId, projectIds), sql`status != 'done'`));
+    .where(and(taskScope, sql`status != 'done'`));
   const [completedResult] = await db
     .select({ count: sql<number>`count(*)` })
     .from(tasks)
-    .where(and(inArray(tasks.projectId, projectIds), eq(tasks.status, "done")));
+    .where(and(taskScope, eq(tasks.status, "done")));
   const [approvalResult] = await db
     .select({ count: sql<number>`count(*)` })
     .from(tasks)
-    .where(
-      and(inArray(tasks.projectId, projectIds), eq(tasks.status, "approval")),
-    );
+    .where(and(taskScope, eq(tasks.status, "approval")));
 
   return {
     activeTasks: Number(activeResult?.count ?? 0),
