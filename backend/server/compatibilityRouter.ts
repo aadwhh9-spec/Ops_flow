@@ -1,6 +1,7 @@
 ﻿import { GoogleGenAI } from "@google/genai";
 import { Router, type Request, type Response } from "express";
 import { createHash, randomInt } from "crypto";
+import nodemailer from "nodemailer";
 import { COOKIE_NAME } from "@shared/const";
 import { hashPassword, signSessionToken, verifyPassword } from "./_core/auth";
 import { getSessionCookieOptions } from "./_core/cookies";
@@ -73,23 +74,98 @@ function resetCodeHash(email: string, code: string) {
     .digest("hex");
 }
 
-async function sendPasswordResetEmail(email: string, code: string) {
-  if (!ENV.resendApiKey) return false;
-  const response = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${ENV.resendApiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      from: ENV.resetEmailFrom,
-      to: [email],
-      subject: "OpsFlow password reset code",
-      text: `Your OpsFlow password reset code is ${code}. It expires in 10 minutes.`,
-    }),
+function escapeEmailHtml(value: string) {
+  return value.replace(/[&<>"']/g, (character) => {
+    const entities: Record<string, string> = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#039;",
+    };
+    return entities[character];
   });
-  if (!response.ok) throw new Error("Password reset email delivery failed");
-  return true;
+}
+
+async function sendPasswordResetEmail(email: string, code: string) {
+  if (
+    !ENV.smtpHost ||
+    !ENV.smtpUser ||
+    !ENV.smtpPass ||
+    !ENV.emailFrom ||
+    !Number.isInteger(ENV.smtpPort)
+  )
+    throw new Error("Password reset email is not configured");
+  const transporter = nodemailer.createTransport({
+    host: ENV.smtpHost,
+    port: ENV.smtpPort,
+    secure: ENV.smtpPort === 465,
+    requireTLS: ENV.smtpPort === 587,
+    auth: { user: ENV.smtpUser, pass: ENV.smtpPass },
+    tls: { minVersion: "TLSv1.2" },
+  });
+  await transporter.sendMail({
+    from: ENV.emailFrom,
+    to: email,
+    subject: "OpsFlow | Password reset code",
+    text: `Your OpsFlow password reset code is ${code}. It expires in 10 minutes. If you did not request this, you can ignore this email.`,
+    html: `
+        <div style="background:#f3f5f9;padding:32px;font-family:Arial,sans-serif;color:#0e1526">
+          <div style="max-width:520px;margin:auto;background:#fff;border-radius:16px;padding:32px;border:1px solid #e5e7eb">
+            <div style="font-size:24px;font-weight:800;color:#2563eb;margin-bottom:24px">OpsFlow</div>
+            <h1 style="font-size:22px;margin:0 0 12px">Reset your password</h1>
+            <p style="font-size:14px;line-height:1.6;color:#64748b">Use this verification code to reset your OpsFlow password:</p>
+            <div style="font-size:32px;font-weight:800;letter-spacing:8px;text-align:center;background:#eff6ff;color:#1d4ed8;padding:18px;border-radius:12px;margin:24px 0">${code}</div>
+            <p style="font-size:13px;color:#64748b">This code expires in 10 minutes and can only be used once.</p>
+            <p style="font-size:12px;color:#94a3b8;margin-top:24px">If you did not request a password reset, ignore this email. Your password will remain unchanged.</p>
+          </div>
+        </div>`,
+  });
+}
+
+async function sendStaffInvitationEmail(
+  email: string,
+  name: string | null,
+  code: string,
+  projectName?: string,
+) {
+  if (
+    !ENV.smtpHost ||
+    !ENV.smtpUser ||
+    !ENV.smtpPass ||
+    !ENV.emailFrom ||
+    !Number.isInteger(ENV.smtpPort)
+  )
+    throw new Error("Staff invitation email is not configured");
+  const transporter = nodemailer.createTransport({
+    host: ENV.smtpHost,
+    port: ENV.smtpPort,
+    secure: ENV.smtpPort === 465,
+    requireTLS: ENV.smtpPort === 587,
+    auth: { user: ENV.smtpUser, pass: ENV.smtpPass },
+    tls: { minVersion: "TLSv1.2" },
+  });
+  const inviteUrl = `${ENV.appUrl.replace(/\/$/, "")}/?invite=1&email=${encodeURIComponent(email)}`;
+  const assignment = projectName ? ` and added to the project “${projectName}”` : "";
+  const safeName = escapeEmailHtml(name || "there");
+  const safeAssignment = escapeEmailHtml(assignment);
+  await transporter.sendMail({
+    from: ENV.emailFrom,
+    to: email,
+    subject: "OpsFlow | Staff invitation",
+    text: `Hello ${name || "there"}, you have been invited to OpsFlow as a Staff member${assignment}. Open ${inviteUrl} and use code ${code} to create your password. The code expires in 10 minutes.`,
+    html: `
+      <div style="background:#f3f5f9;padding:32px;font-family:Arial,sans-serif;color:#0e1526">
+        <div style="max-width:520px;margin:auto;background:#fff;border-radius:16px;padding:32px;border:1px solid #e5e7eb">
+          <div style="font-size:24px;font-weight:800;color:#2563eb;margin-bottom:24px">OpsFlow</div>
+          <h1 style="font-size:22px;margin:0 0 12px">You have been invited</h1>
+          <p style="font-size:14px;line-height:1.6;color:#64748b">Hello ${safeName}, an administrator invited you to join OpsFlow as a Staff member${safeAssignment}.</p>
+          <div style="font-size:32px;font-weight:800;letter-spacing:8px;text-align:center;background:#eff6ff;color:#1d4ed8;padding:18px;border-radius:12px;margin:24px 0">${code}</div>
+          <p style="font-size:13px;color:#64748b">This one-time code expires in 10 minutes.</p>
+          <a href="${inviteUrl}" style="display:block;background:#2563eb;color:#fff;text-decoration:none;text-align:center;font-weight:700;padding:13px;border-radius:10px;margin-top:24px">Create your password</a>
+        </div>
+      </div>`,
+  });
 }
 
 function loginAttemptKey(req: Request, email: string) {
@@ -235,6 +311,7 @@ compatibilityRouter.post("/auth/register", async (req, res, next) => {
       openId: email,
       name,
       email,
+      role: email === ENV.ownerOpenId ? "super_admin" : "admin",
       loginMethod: "password",
       passwordHash: await hashPassword(password),
       lastSignedIn: new Date(),
@@ -261,7 +338,7 @@ compatibilityRouter.post("/auth/forgot-password", async (req, res, next) => {
       .trim()
       .toLowerCase();
     if (!email) return res.status(400).json({ error: "Email is required" });
-    if (ENV.isProduction && !ENV.resendApiKey)
+    if (!ENV.smtpHost || !ENV.smtpUser || !ENV.smtpPass || !ENV.emailFrom)
       return res
         .status(503)
         .json({ error: "Password reset email is not configured" });
@@ -283,7 +360,6 @@ compatibilityRouter.post("/auth/forgot-password", async (req, res, next) => {
     });
 
     const user = await getUserByEmail(email);
-    let developmentCode: string | undefined;
     if (user) {
       const code = String(randomInt(100000, 1000000));
       await createPasswordResetToken(
@@ -291,13 +367,11 @@ compatibilityRouter.post("/auth/forgot-password", async (req, res, next) => {
         resetCodeHash(email, code),
         new Date(now + 10 * 60 * 1000),
       );
-      if (ENV.isProduction) await sendPasswordResetEmail(email, code);
-      else developmentCode = code;
+      await sendPasswordResetEmail(email, code);
     }
     return res.json({
       success: true,
       message: "If an account exists, a reset code has been sent.",
-      developmentCode,
     });
   } catch (error) {
     next(error);
@@ -846,12 +920,21 @@ compatibilityRouter.post("/members", async (req, res, next) => {
     if (!req.body.email)
       return res.status(400).json({ error: "Email is required" });
     const email = String(req.body.email).trim().toLowerCase();
+    let project;
+    if (req.body.projectId) {
+      project = await getProjectById(Number(req.body.projectId));
+      if (!project) return res.status(404).json({ error: "Project not found" });
+      if (!canManageMembers(user, project))
+        return res.status(403).json({ error: "Project owner access required" });
+    }
     let member = await getUserByEmail(email);
+    const needsInvitation = !member?.passwordHash;
     if (!member) {
       await upsertUser({
         openId: email,
         email,
         name: req.body.name,
+        role: "staff",
         loginMethod: "invited",
       });
       member = await getUserByEmail(email);
@@ -864,11 +947,7 @@ compatibilityRouter.post("/members", async (req, res, next) => {
       member = await getUserByEmail(email);
       if (!member) throw new Error("Failed to promote administrator");
     }
-    if (req.body.projectId) {
-      const project = await getProjectById(Number(req.body.projectId));
-      if (!project) return res.status(404).json({ error: "Project not found" });
-      if (!canManageMembers(user, project))
-        return res.status(403).json({ error: "Project owner access required" });
+    if (project) {
       if (!isSuperAdmin(user.role) && member.role !== "staff")
         return res
           .status(403)
@@ -883,6 +962,20 @@ compatibilityRouter.post("/members", async (req, res, next) => {
           actorId: user.id,
         });
       }
+    }
+    if (needsInvitation && member.role === "staff") {
+      const code = String(randomInt(100000, 1000000));
+      await createPasswordResetToken(
+        member.id,
+        resetCodeHash(email, code),
+        new Date(Date.now() + 10 * 60 * 1000),
+      );
+      await sendStaffInvitationEmail(
+        email,
+        member.name,
+        code,
+        project?.name,
+      );
     }
     return res.status(201).json({ success: true, member });
   } catch (error) {

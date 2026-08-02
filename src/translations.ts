@@ -71,6 +71,8 @@ export const EN_TO_AR: Record<string, string> = {
     "أدخل بياناتك للوصول إلى مركز العمليات",
   "Create an administrator account": "إنشاء حساب جديد",
   "Enter your email": "أدخل بريدك الإلكتروني",
+  "Enter your email to receive a reset code":
+    "أدخل بريدك الإلكتروني لاستلام رمز إعادة التعيين",
   "Enter your password": "أدخل كلمة المرور",
   "Enter full name": "أدخل الاسم الكامل",
   "Create a password": "أنشئ كلمة مرور",

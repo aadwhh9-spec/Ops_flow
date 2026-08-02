@@ -8,6 +8,19 @@ function required(name: string, fallback?: string): string {
   return val;
 }
 
+function appUrl(): string {
+  const value = process.env.APP_URL ?? "http://localhost:5173";
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error();
+    return url.origin;
+  } catch {
+    throw new Error(
+      "APP_URL must be a complete URL, for example http://localhost:5173 or https://your-app.onrender.com",
+    );
+  }
+}
+
 export const ENV = {
   databaseUrl: required("DATABASE_URL"),
 
@@ -22,9 +35,12 @@ export const ENV = {
 
   port: Number(process.env.PORT ?? 4000),
 
-  resendApiKey: process.env.RESEND_API_KEY ?? "",
-  resetEmailFrom:
-    process.env.RESET_EMAIL_FROM ?? "OpsFlow <onboarding@resend.dev>",
+  smtpHost: process.env.SMTP_HOST ?? "",
+  smtpPort: Number(process.env.SMTP_PORT ?? 587),
+  smtpUser: process.env.SMTP_USER ?? "",
+  smtpPass: process.env.SMTP_PASS ?? "",
+  emailFrom: process.env.EMAIL_FROM ?? "",
+  appUrl: appUrl(),
 
   isProduction: process.env.NODE_ENV === "production",
 };

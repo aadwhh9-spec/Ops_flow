@@ -5,6 +5,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { hashPassword, signSessionToken, verifyPassword } from "./_core/auth";
 import { systemRouter } from "./_core/systemRouter";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
+import { ENV } from "./_core/env";
 import {
   addProjectMember,
   changeProjectOwner,
@@ -145,6 +146,7 @@ export const appRouter = router({
           openId: email,
           name: input.name,
           email,
+          role: email === ENV.ownerOpenId ? "super_admin" : "admin",
           loginMethod: "password",
           passwordHash: await hashPassword(input.password),
           lastSignedIn: new Date(),

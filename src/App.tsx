@@ -179,6 +179,16 @@ export default function App() {
   };
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("invite") === "1") {
+      setLoginEmail(params.get("email") ?? "");
+      setIsSignupMode(false);
+      setIsResetMode(true);
+      setResetCodeSent(true);
+      setResetMessage("Enter the invitation code sent to your email, then create your password.");
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+
     const restoreSession = async () => {
       try {
         const res = await fetch("/api/auth/me");
@@ -293,11 +303,7 @@ export default function App() {
       return;
     }
     setResetCodeSent(true);
-    setResetMessage(
-      data.developmentCode
-        ? `Development reset code: ${data.developmentCode}`
-        : data.message,
-    );
+    setResetMessage(data.message);
   };
 
   const handleResetPassword = async () => {
@@ -807,7 +813,9 @@ export default function App() {
           </h2>
           <p className="text-sm text-center text-gray-500 mb-6">
             {isResetMode
-              ? t("Use the code sent to your email")
+              ? resetCodeSent
+                ? t("Use the code sent to your email")
+                : t("Enter your email to receive a reset code")
               : isSignupMode
                 ? t("Create an administrator account")
                 : t("Enter your credentials to access the operations hub")}
@@ -838,6 +846,7 @@ export default function App() {
                 <input
                   type="email"
                   autoComplete="email"
+                  placeholder={t("Enter your email")}
                   value={loginEmail}
                   onChange={(event) => setLoginEmail(event.target.value)}
                   className="w-full px-4 py-2.5 bg-[#FAFBFD] border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-800"
